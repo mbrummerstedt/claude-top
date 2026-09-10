@@ -40,32 +40,30 @@ struct LiveMachineTests {
         #expect(environments[me]?.pwd != nil, "own PWD came back empty")
     }
 
-    @Test("Cumulative CPU time is in seconds, not in mach ticks")
-    func cpuTimeIsInSeconds() {
+    @Test("Cumulative CPU time matches what the kernel says this process has used")
+    func cpuTimeMatchesGetrusage() throws {
         // The unit this whole tool ranks on. `pti_total_user` and `pti_total_system` are
         // mach absolute time units, and on Apple Silicon a tick is 125/3 nanoseconds, so
         // reading them as nanoseconds understates every process by nearly 42x. On Intel
         // the timebase is 1:1 and the mistake is invisible, which is how it survives.
         //
-        // Measured against this process, so it does not depend on what else is running.
+        // Checked against getrusage, which reports this process's own consumption in
+        // plain timevals. Nothing here depends on the scheduler: an earlier version spun
+        // a thread for a wall second and asserted it earned roughly a second of CPU,
+        // which is untrue on a machine at load 43 where it earns a fifth of one.
+        var usage = rusage()
+        try #require(getrusage(RUSAGE_SELF, &usage) == 0)
+        let fromKernel = Double(usage.ru_utime.tv_sec) + Double(usage.ru_utime.tv_usec) / 1e6
+            + Double(usage.ru_stime.tv_sec) + Double(usage.ru_stime.tv_usec) / 1e6
+
         let me = getpid()
-        func consumedByThisProcess() -> TimeInterval {
-            ProcessTable.current().first { $0.pid == me }?.cpuTime ?? 0
-        }
+        let fromLibproc = try #require(ProcessTable.current().first { $0.pid == me }?.cpuTime)
 
-        let before = consumedByThisProcess()
-        let deadline = Date().addingTimeInterval(1.0)
-        var sink = 0.0
-        while Date() < deadline { sink += 1 }
-        _ = sink
-        let consumed = consumedByThisProcess() - before
-
-        // A second of wall time spent spinning is at most a second of CPU, and on a
-        // machine already at three times its core count it is closer to half of that.
-        // The bound is set to tolerate contention while staying an order of magnitude
-        // above where the tick error lands, which is 0.024s.
-        #expect(consumed > 0.2, "one second of spinning was recorded as \(consumed)s of CPU")
-        #expect(consumed < 3.0, "one second of spinning was recorded as \(consumed)s of CPU")
+        try #require(fromKernel > 0.05, "this process has used too little CPU to compare")
+        // Sampled a moment apart, so they differ by whatever ran in between, never by a
+        // factor. The tick error would put libproc at 2.4% of the kernel's figure.
+        #expect(abs(fromLibproc - fromKernel) / fromKernel < 0.25,
+                "libproc says \(fromLibproc)s, getrusage says \(fromKernel)s")
     }
 
     @Test("Cumulative CPU time agrees with what ps reports for the same process")

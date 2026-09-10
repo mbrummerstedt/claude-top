@@ -225,3 +225,207 @@ extension AttributionTier {
         }
     }
 }
+
+/// What the live view knows about itself.
+public struct LiveViewStatus: Sendable {
+    public let refreshInterval: TimeInterval
+    /// This process's own CPU across the last interval. The design notes argued against a
+    /// live view on the grounds that it would compete for the cores you are trying to
+    /// free; showing the number settles that by measurement rather than by assertion.
+    public let ownCPUPercent: Double?
+    public let ownRSSBytes: UInt64
+    public let rosterSource: Roster.Source
+
+    public init(refreshInterval: TimeInterval, ownCPUPercent: Double?,
+                ownRSSBytes: UInt64, rosterSource: Roster.Source) {
+        self.refreshInterval = refreshInterval; self.ownCPUPercent = ownCPUPercent
+        self.ownRSSBytes = ownRSSBytes; self.rosterSource = rosterSource
+    }
+}
+
+extension Renderer {
+
+    /// How many rows each block gets, decided before anything is drawn.
+    ///
+    /// Sessions are the headline but orphans are the part a person can act on without
+    /// costing anyone their work, so orphans and the system block are given their rows
+    /// first and sessions take what is left. Observed at load 91 with 21 sessions: the
+    /// orphan block had been squeezed to two rows and "and 2 more", which is the wrong
+    /// thing to hide at exactly the moment it matters.
+    static func allocateRows(available: Int, sessions: Int, orphans: Int,
+                             everythingElse: Int) -> (sessions: Int, orphans: Int,
+                                                      everythingElse: Int) {
+        // A heading and a trailing blank line, per block that appears at all.
+        let overhead = 2
+        func cost(_ rows: Int) -> Int { rows == 0 ? 0 : rows + overhead }
+
+        var orphanRows = min(orphans, 6)
+        var elseRows = min(everythingElse, 5)
+        var sessionRows = min(sessions, max(0, available - cost(orphanRows) - cost(elseRows)
+                                            - (sessions > 0 ? overhead : 0)))
+
+        // Still over, which happens on a short terminal. Give back in reverse order of
+        // how much the row is worth reading.
+        while cost(sessionRows) + cost(orphanRows) + cost(elseRows) > available {
+            if elseRows > 1 { elseRows -= 1 }
+            else if sessionRows > 1 { sessionRows -= 1 }
+            else if orphanRows > 1 { orphanRows -= 1 }
+            else if elseRows > 0 { elseRows = 0 }
+            else if sessionRows > 0 { sessionRows = 0 }
+            else if orphanRows > 0 { orphanRows = 0 }
+            else { break }
+        }
+        return (sessionRows, orphanRows, elseRows)
+    }
+
+    /// One full-screen frame, built to fit exactly the terminal it is going into.
+    ///
+    /// Both dimensions are hard limits. A line wider than the terminal wraps and pushes
+    /// everything below it down a row, so the next redraw paints over the wrong lines;
+    /// a frame taller than the terminal scrolls, and a view that scrolls while it
+    /// redraws cannot be read at all.
+    public static func liveFrame(_ snapshot: Snapshot, width: Int, height: Int,
+                                 status: LiveViewStatus) -> String {
+        var lines: [String] = []
+        let machine = snapshot.machine
+
+        let ratio = machine.oversubscription
+        var header = "load \(String(format: "%.1f", machine.loadAverage1))"
+            + "  \(machine.cpuCount) cores"
+        if ratio > 1 { header += "  \(String(format: "%.1f", ratio))x" }
+        let memory = "mem \(String(format: "%.1f", Double(machine.memUsedBytes) / 1_073_741_824))"
+            + "/\(String(format: "%.0f", Double(machine.memTotalBytes) / 1_073_741_824))G"
+        lines.append(fit(header, memory, width: width))
+
+        if case .cached(let age) = status.rosterSource {
+            lines.append(clip("session list is cached (\(Int(age))s old), "
+                              + "reaping is disabled until it refreshes", width))
+        } else if status.rosterSource == .unavailable {
+            lines.append(clip("session list unavailable, sessions below may be live", width))
+        }
+        lines.append("")
+
+        let orphans = snapshot.orphans
+        let rosterIsKnown = status.rosterSource != .unavailable
+        let footerRows = 2
+        let allocation = allocateRows(available: max(0, height - lines.count - footerRows),
+                                      sessions: snapshot.sessions.count,
+                                      orphans: orphans.count,
+                                      everythingElse: snapshot.everythingElse.count)
+
+        func section(_ title: String, _ groups: [AttributionGroup], rows: Int,
+                     summary: String? = nil, showAge: Bool = false) {
+            guard !groups.isEmpty, rows > 0 else { return }
+            lines.append(clip(summary.map { "\(title)  \($0)" } ?? title, width))
+
+            // One row gives way to the count when there is more than fits, so the number
+            // is never itself the thing that got cut.
+            let shown = groups.count > rows ? max(1, rows - 1) : rows
+            for group in groups.prefix(shown) {
+                lines.append(liveRow(group, width: width, showAge: showAge,
+                                     asOf: machine.capturedAt))
+            }
+            if groups.count > shown {
+                lines.append(clip("  and \(groups.count - shown) more", width))
+            }
+            lines.append("")
+        }
+
+        section("CLAUDE SESSIONS", snapshot.sessions, rows: allocation.sessions)
+
+        if rosterIsKnown {
+            // Processes, memory and containers rather than a CPU percentage: an idle
+            // orphan reads as 0% and is still holding a Postgres and 200 MB.
+            let processes = orphans.reduce(0) { $0 + $1.pids.count }
+            let containers = orphans.reduce(0) { $0 + $1.containerIDs.count }
+            let bytes = orphans.reduce(UInt64(0)) { $0 + $1.rssBytes }
+            var summary = "\(processes) processes, \(formatBytes(bytes))"
+            if containers > 0 { summary += ", \(containers) containers" }
+            section("ORPHANED", orphans, rows: allocation.orphans,
+                    summary: summary + " free to reclaim", showAge: true)
+        } else {
+            // Without a roster, a stamped process whose session is simply unlisted
+            // resolves to an orphan. These may be the sessions in front of you. The rows
+            // stay, because the resources are real; the word "orphaned" and the
+            // invitation to stop them do not.
+            section("UNIDENTIFIED", orphans, rows: allocation.orphans,
+                    summary: "no session list, these may be live", showAge: true)
+        }
+
+        section("EVERYTHING ELSE", snapshot.everythingElse, rows: allocation.everythingElse)
+
+        while lines.count < height - footerRows { lines.append("") }
+
+        let cost = status.ownCPUPercent.map { "\(Int($0.rounded()))%" } ?? "?"
+        lines.append(clip("claude-top \(cost) cpu, \(formatBytes(status.ownRSSBytes)), "
+                          + "every \(Int(status.refreshInterval))s"
+                          + (snapshot.unreadableProcessCount > 0
+                             ? "  ·  \(snapshot.unreadableProcessCount) processes not inspectable"
+                             : ""), width))
+        let offerReap = !orphans.isEmpty && status.rosterSource == .live
+        lines.append(clip("q quit" + (offerReap ? "  ·  claude-top --reap" : ""), width))
+
+        return lines.prefix(height).joined(separator: "\n")
+    }
+
+    /// The frame shown while the first sample is still being gathered.
+    ///
+    /// Load and memory come from `sysctl` and are free; attribution is not. At load 89 a
+    /// cold sample takes twelve seconds of wall time on this machine, and twelve seconds
+    /// of blank screen is how someone concludes the tool is part of the problem.
+    public static func liveFrameCollecting(_ machine: MachineInfo, width: Int,
+                                           height: Int) -> String {
+        let ratio = machine.oversubscription
+        var header = "load \(String(format: "%.1f", machine.loadAverage1))"
+            + "  \(machine.cpuCount) cores"
+        if ratio > 1 { header += "  \(String(format: "%.1f", ratio))x" }
+        let memory = "mem \(String(format: "%.1f", Double(machine.memUsedBytes) / 1_073_741_824))"
+            + "/\(String(format: "%.0f", Double(machine.memTotalBytes) / 1_073_741_824))G"
+
+        var lines = [fit(header, memory, width: width), "",
+                     clip("reading the process table…", width)]
+        while lines.count < height - 1 { lines.append("") }
+        lines.append(clip("q quit", width))
+        return lines.prefix(height).joined(separator: "\n")
+    }
+
+    private static func liveRow(_ group: AttributionGroup, width: Int, showAge: Bool,
+                                asOf: Date) -> String {
+        let cpu = group.cpuPercent.map { "\(Int($0.rounded()))%" } ?? "?"
+        var right = right(cpu, 6) + right(formatBytes(group.rssBytes), 7)
+            + right("\(group.pids.count)p", 5)
+        if group.containerIDs.isEmpty { right += "     " }
+        else { right += self.right("\(group.containerIDs.count)c", 5) }
+        if showAge {
+            right += self.right(group.oldestProcessStartedAt
+                                .map { formatDuration(asOf.timeIntervalSince($0)) } ?? "", 5)
+        }
+
+        let room = max(4, width - right.count - 2)
+        return pad("  " + truncate(displayLabel(group), to: room - 2), to: room) + right
+    }
+
+    /// Left text and right text on one line, with the left giving way first.
+    private static func fit(_ left: String, _ right: String, width: Int) -> String {
+        guard left.count + right.count + 2 <= width else {
+            return clip(left, width)
+        }
+        return left + String(repeating: " ", count: width - left.count - right.count) + right
+    }
+
+    private static func clip(_ text: String, _ width: Int) -> String {
+        text.count <= width ? text : String(text.prefix(width))
+    }
+
+    /// Middles removed rather than tails, because a worktree name is distinguished by
+    /// both ends and `miinto-simple-dynamic-pricing::revenue-sh` tells you less than
+    /// `miinto-simple…revenue-share-page` does.
+    static func truncate(_ text: String, to width: Int) -> String {
+        guard width > 3, text.count > width else {
+            return width <= 3 ? String(text.prefix(max(0, width))) : text
+        }
+        let head = (width - 1) / 2
+        let tail = width - 1 - head
+        return String(text.prefix(head)) + "…" + String(text.suffix(tail))
+    }
+}

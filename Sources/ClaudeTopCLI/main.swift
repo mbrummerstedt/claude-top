@@ -28,7 +28,7 @@ claude-top — which Claude Code session is using your machine
 USAGE
   claude-top                    two samples 700ms apart, then the table
   claude-top --json             the same snapshot as JSON, for hooks and agents
-  claude-top --watch [seconds]  re-run every n seconds (default 5)
+  claude-top --watch [seconds]  full-screen live view, redraws in place (default 5s)
   claude-top --since <duration> history from the rolling 24h store, e.g. 20m, 2h
   claude-top --sample           one sampler tick written to the store; what launchd runs
   claude-top --statusline       one line for a shell prompt
@@ -337,15 +337,11 @@ func keepMarkedWorktrees(in sample: RawSample) -> Set<String> {
 
 // MARK: - the default reading
 
-let interval = value("--watch").flatMap(Double.init) ?? 5
+if flag("--watch") {
+    // A full-screen view that redraws in place. Cheap by construction: see LiveView.
+    LiveView.run(interval: value("--watch").flatMap(Double.init) ?? 5)
+    exit(0)
+}
 
-repeat {
-    let snapshot = Sampler.snapshot()
-    if flag("--json") {
-        print(Renderer.json(snapshot))
-    } else {
-        if flag("--watch") { print("\u{1B}[2J\u{1B}[H", terminator: "") }
-        print(Renderer.text(snapshot))
-    }
-    if flag("--watch") { Thread.sleep(forTimeInterval: interval) }
-} while flag("--watch")
+let snapshot = Sampler.snapshot()
+print(flag("--json") ? Renderer.json(snapshot) : Renderer.text(snapshot))
