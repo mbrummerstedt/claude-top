@@ -8,15 +8,17 @@ public struct RawSample: Sendable {
     public let processesReadAt: Date
     public let environments: [Int32: ProcessEnvironment]
     public let containers: [ContainerInfo]
-    public let sessions: [SessionInfo]
+    public let roster: Roster
     public let machine: MachineInfo
+
+    public var sessions: [SessionInfo] { roster.sessions }
 
     public init(processes: [ProcessSample], processesReadAt: Date,
                 environments: [Int32: ProcessEnvironment], containers: [ContainerInfo],
-                sessions: [SessionInfo], machine: MachineInfo) {
+                roster: Roster, machine: MachineInfo) {
         self.processes = processes; self.processesReadAt = processesReadAt
         self.environments = environments; self.containers = containers
-        self.sessions = sessions; self.machine = machine
+        self.roster = roster; self.machine = machine
     }
 }
 
@@ -41,7 +43,7 @@ public enum Sampler {
             processesReadAt: readAt,
             environments: environments,
             containers: ContainerCollector.current(timeout: timeout),
-            sessions: SessionRoster.live(timeout: timeout),
+            roster: SessionRoster.live(),
             machine: MachineProbe.current(capturedAt: readAt, processCount: pids.count))
     }
 

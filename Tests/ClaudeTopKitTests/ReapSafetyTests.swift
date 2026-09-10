@@ -49,7 +49,8 @@ struct ReapSafetyTests {
             processes: processes,
             environments: Dictionary(uniqueKeysWithValues: environments.map { ($0.pid, $0) }),
             containers: containers,
-            sessions: sessions,
+            // A roster read just now, which is the only state a reap is allowed in.
+            roster: Roster(sessions: sessions, source: .live),
             keepMarkedWorktrees: keep)
     }
 
@@ -194,7 +195,7 @@ struct ReapSafetyTests {
                      processes: processes, environments: environments,
                      containers: containers, keep: [worktreeA])
         #expect(p.isEmpty)
-        #expect(p.exemptedByKeepFile)
+        #expect(p.refusal == .keepFile)
     }
 
     @Test("Every selection carries the reason it was selected")
@@ -228,7 +229,8 @@ struct ReapSafetyTests {
         for target in sessions {
             let p = AttributionEngine.reapPlan(
                 for: .session(uuid: target.sessionID), processes: procs,
-                environments: envs, containers: try Fixture.containers(), sessions: sessions)
+                environments: envs, containers: try Fixture.containers(),
+                roster: Roster(sessions: sessions, source: .live))
 
             for selected in p.processes {
                 guard case .session(let uuid)? = attribution[selected.pid]?.key else {
@@ -260,7 +262,8 @@ struct ReapSafetyTests {
         for key in orphanKeys {
             let p = AttributionEngine.reapPlan(
                 for: key, processes: procs, environments: envs,
-                containers: try Fixture.containers(), sessions: sessions)
+                containers: try Fixture.containers(),
+                roster: Roster(sessions: sessions, source: .live))
             totalSelected += p.processes.count
             for selected in p.processes {
                 if case .session(let uuid)? = attribution[selected.pid]?.key {

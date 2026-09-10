@@ -249,16 +249,39 @@ if flag("--reap") {
     let plans = snapshot.orphans.map { group in
         AttributionEngine.reapPlan(
             for: group.key, processes: sample.processes, environments: sample.environments,
-            containers: sample.containers, sessions: sample.sessions,
+            containers: sample.containers, roster: sample.roster,
             keepMarkedWorktrees: keepMarkedWorktrees(in: sample))
-    }.filter { !$0.isEmpty }
+    }
 
-    guard !plans.isEmpty else {
+    // Said plainly rather than reported as "nothing found". A roster that could not be
+    // read makes every live session look abandoned, so refusing is the whole point, and
+    // a refusal that looks like an empty result teaches the wrong thing.
+    if let refused = plans.first(where: { $0.refusal == .rosterNotLive }) {
+        _ = refused
+        let age: String
+        switch sample.roster.source {
+        case .cached(let seconds): age = "the last one is \(Int(seconds))s old"
+        case .unavailable: age = "there is no recent one to fall back on"
+        case .live: age = ""
+        }
+        fail("refusing to reap: the session roster could not be read just now, and \(age). "
+             + "Without it every live session looks abandoned. Try again, or check "
+             + "`claude agents --json` responds.")
+    }
+
+    let actionable = plans.filter { !$0.isEmpty }
+    for kept in plans where kept.refusal == .keepFile {
+        let label = AttributionEngine.label(for: kept.key, sessions: sample.sessions,
+                                            machine: sample.machine)
+        print("skipping \(label): exempted by a .claude-top-keep file")
+    }
+
+    guard !actionable.isEmpty else {
         print("nothing to reap: no orphaned processes carrying a dead session's stamp")
         exit(0)
     }
 
-    for plan in plans {
+    for plan in actionable {
         let label = AttributionEngine.label(for: plan.key, sessions: sample.sessions,
                                             machine: sample.machine)
         print("\(label)  \(plan.processes.count) processes, "
@@ -286,7 +309,7 @@ if flag("--reap") {
     }
 
     let reaper = Reaper()
-    for plan in plans {
+    for plan in actionable {
         let outcome = reaper.execute(plan)
         print("\(plan.key.storageKey): "
               + "\(outcome.terminated.count) signalled, \(outcome.killed.count) escalated, "

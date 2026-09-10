@@ -8,8 +8,89 @@ import Foundation
 /// on the machine was able to confirm any session is alive.
 public enum SessionRoster {
 
-    public static func live(timeout: TimeInterval = 3,
-                            candidates: [String]? = nil) -> [SessionInfo] {
+    /// Ten seconds, not three.
+    ///
+    /// `claude agents --json` answers in under half a second on an idle machine and took
+    /// 5.9 seconds on this one at load 22. A timeout tuned to the idle case expires
+    /// exactly when the machine is busy, which is the only time anyone runs this.
+    public static let defaultTimeout: TimeInterval = 10
+
+    /// How long a remembered roster is still worth showing. Sessions come and go; an
+    /// hour-old roster describes a machine that no longer exists.
+    public static let cacheWindow: TimeInterval = 600
+
+    public static var cachePath: URL {
+        URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".claude/state/claude-top-roster-cache.json")
+    }
+
+    /// The roster, and where it came from.
+    ///
+    /// A read that fails falls back to the last good one rather than to silence, because
+    /// an empty roster resolves every stamped process to an orphan and orphans are what
+    /// `--reap` acts on. The fallback is labelled so nothing mistakes it for fresh.
+    public static func live(timeout: TimeInterval = defaultTimeout,
+                            candidates: [String]? = nil,
+                            cache: URL? = cachePath) -> Roster {
+        if let sessions = read(timeout: timeout, candidates: candidates) {
+            if let cache { remember(sessions, at: cache) }
+            return Roster(sessions: sessions, source: .live)
+        }
+        if let cache, let remembered = remembered(at: cache, now: Date(),
+                                                  maximumAge: cacheWindow) {
+            return remembered
+        }
+        return Roster(sessions: [], source: .unavailable)
+    }
+
+    /// What is on disk from the last successful read, if it is recent enough to mean
+    /// anything.
+    public static func remembered(at path: URL, now: Date,
+                                  maximumAge: TimeInterval) -> Roster? {
+        guard let data = try? Data(contentsOf: path),
+              let stored = try? JSONDecoder().decode(CachedRoster.self, from: data)
+        else { return nil }
+
+        let age = now.timeIntervalSince(stored.writtenAt)
+        guard age >= 0, age <= maximumAge else { return nil }
+
+        return Roster(sessions: stored.sessions.map(\.asSessionInfo), source: .cached(age: age))
+    }
+
+    /// The prompt is deliberately not written. This is a file that outlives the terminal
+    /// the prompt was printed to.
+    public static func remember(_ sessions: [SessionInfo], at path: URL) {
+        let stored = CachedRoster(writtenAt: Date(),
+                                  sessions: sessions.map(CachedRoster.Entry.init))
+        guard let data = try? JSONEncoder().encode(stored) else { return }
+        try? FileManager.default.createDirectory(at: path.deletingLastPathComponent(),
+                                                 withIntermediateDirectories: true)
+        try? data.write(to: path, options: .atomic)
+    }
+
+    struct CachedRoster: Codable {
+        let writtenAt: Date
+        let sessions: [Entry]
+
+        struct Entry: Codable {
+            let pid: Int32
+            let cwd: String
+            let sessionID: String
+            let startedAt: Date
+
+            init(_ session: SessionInfo) {
+                pid = session.pid; cwd = session.cwd
+                sessionID = session.sessionID; startedAt = session.startedAt
+            }
+
+            var asSessionInfo: SessionInfo {
+                SessionInfo(pid: pid, cwd: cwd, sessionID: sessionID, startedAt: startedAt)
+            }
+        }
+    }
+
+    private static func read(timeout: TimeInterval,
+                             candidates: [String]?) -> [SessionInfo]? {
         let binaries = candidates ?? Shell.locateAll("claude", extraDirectories: [
             (NSHomeDirectory() as NSString).appendingPathComponent(".claude/local"),
         ])
@@ -27,7 +108,8 @@ public enum SessionRoster {
             // An empty array is a real answer: no sessions are running.
             return parse(data)
         }
-        return []
+        // nil, not []. Nothing answered, which is a different fact from nothing running.
+        return nil
     }
 
     /// The `name` field of each row is the user's opening prompt. It is carried only far

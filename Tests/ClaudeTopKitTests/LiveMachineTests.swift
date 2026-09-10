@@ -139,7 +139,7 @@ struct LiveMachineTests {
         for key in Set(attribution.values.map(\.key)) {
             let plan = AttributionEngine.reapPlan(
                 for: key, processes: sample.processes, environments: sample.environments,
-                containers: sample.containers, sessions: sample.sessions)
+                containers: sample.containers, roster: sample.roster)
             for selected in plan.processes {
                 #expect(attribution[selected.pid]?.key == key,
                         "a reap plan for \(key) selected pid \(selected.pid) from another group")

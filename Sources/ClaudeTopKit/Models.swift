@@ -316,18 +316,25 @@ public struct ReapComposeTarget: Sendable, Equatable {
 
 /// Deliberately inert. Producing the plan touches nothing; a caller decides whether to
 /// act on it, and `--dry-run` prints one without acting.
+public enum ReapRefusal: Sendable, Equatable {
+    /// A `.claude-top-keep` file in the worktree.
+    case keepFile
+    /// The roster was cached or missing, so "this session is gone" was never established.
+    case rosterNotLive
+}
+
 public struct ReapPlan: Sendable, Equatable {
     public let key: AttributionKey
     public let processes: [ReapTarget]
     public let containers: [ReapComposeTarget]
-    /// Set when a `.claude-top-keep` file exempted the worktree, so the CLI can say why
-    /// an obvious candidate produced nothing.
-    public let exemptedByKeepFile: Bool
+    /// Why an obvious candidate produced nothing, so the CLI can say so rather than
+    /// looking as though it found nothing to do.
+    public let refusal: ReapRefusal?
 
     public init(key: AttributionKey, processes: [ReapTarget],
-                containers: [ReapComposeTarget], exemptedByKeepFile: Bool = false) {
+                containers: [ReapComposeTarget], refusal: ReapRefusal? = nil) {
         self.key = key; self.processes = processes
-        self.containers = containers; self.exemptedByKeepFile = exemptedByKeepFile
+        self.containers = containers; self.refusal = refusal
     }
 
     public var isEmpty: Bool { processes.isEmpty && containers.isEmpty }
@@ -409,4 +416,44 @@ public struct StoredGroup: Sendable {
         self.rssBytes = rssBytes; self.processCount = processCount
         self.containerCount = containerCount; self.sessionPID = sessionPID
     }
+}
+
+/// The session roster, together with where it came from.
+///
+/// The provenance is not bookkeeping. A roster that could not be read is not a roster
+/// with no sessions in it, and the difference decides whether every live session on the
+/// machine reads as an orphan. Carrying the two together makes that impossible to forget
+/// at the call site.
+public struct Roster: Sendable {
+    public enum Source: Sendable, Equatable {
+        /// Read just now. The only state that may authorise stopping anything.
+        case live
+        /// The last good read, reused because a fresh one failed.
+        case cached(age: TimeInterval)
+        /// Nothing to go on.
+        case unavailable
+    }
+
+    public let sessions: [SessionInfo]
+    public let source: Source
+
+    public init(sessions: [SessionInfo], source: Source) {
+        self.sessions = sessions; self.source = source
+    }
+
+    /// Good enough to show. A cached roster describes the machine a few minutes ago,
+    /// which is worth looking at and worth labelling.
+    public var isUsableForDisplay: Bool {
+        switch source {
+        case .live, .cached: return true
+        case .unavailable: return false
+        }
+    }
+
+    /// Good enough to kill by, which only a fresh read is.
+    ///
+    /// A session started since a cache was written is absent from it, so its processes
+    /// would resolve as orphaned. That is acceptable in a list and unacceptable in a
+    /// kill list.
+    public var allowsReaping: Bool { source == .live }
 }

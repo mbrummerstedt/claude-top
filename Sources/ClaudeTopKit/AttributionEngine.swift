@@ -363,9 +363,20 @@ public enum AttributionEngine {
         processes: [ProcessSample],
         environments: [Int32: ProcessEnvironment],
         containers: [ContainerInfo],
-        sessions: [SessionInfo],
+        roster: Roster,
         keepMarkedWorktrees: Set<String> = []
     ) -> ReapPlan {
+        // Nothing is stopped on a roster that was not read just now. A failed read used
+        // to look exactly like "no sessions are running", which resolved every live
+        // session to an orphan and put it on the kill list. `claude agents --json` takes
+        // longer than its timeout precisely when the machine is loaded, which is the only
+        // time anyone runs this.
+        guard roster.allowsReaping else {
+            return ReapPlan(key: target, processes: [], containers: [],
+                            refusal: .rosterNotLive)
+        }
+        let sessions = roster.sessions
+
         // Only work a Claude session is responsible for is reapable. System families and
         // the unattributed bucket are reported so the totals add up, and that is all.
         switch target {
@@ -379,7 +390,7 @@ public enum AttributionEngine {
 
         if let wt = targetWorktree,
            keepMarkedWorktrees.contains(where: { worktreeID(forPath: $0) == wt }) {
-            return ReapPlan(key: target, processes: [], containers: [], exemptedByKeepFile: true)
+            return ReapPlan(key: target, processes: [], containers: [], refusal: .keepFile)
         }
 
         let attribution = resolveProcesses(processes: processes, environments: environments,
