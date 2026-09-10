@@ -37,6 +37,10 @@ else:
     cfg = {}
 
 names = cfg.get("names", {})
+# Terms that must never survive, whatever the other passes did. A name mapping only
+# rewrites what you remembered to list; this is the backstop for what you did not, and
+# it fails the run rather than writing a capture that still contains them.
+forbidden = cfg.get("forbidden", [])
 # Case-insensitive substring replacements applied as a final pass. Structural renames in
 # "names" are exact-match, but captures hold transformed variants of the same words:
 # dash-encoded scratchpad paths, underscore-separated database names, and strings docker
@@ -90,14 +94,18 @@ for f in sorted(d.iterdir()):
 
 print("rewrote:", ", ".join(changed) if changed else "(nothing)")
 
-# Refuse to finish if anything the mapping was meant to remove survived.
+# Refuse to finish if anything that was meant to be removed survived. `forbidden` is
+# checked here too: it is never rewritten, only enforced, so that a term you listed but
+# gave no replacement for stops the capture instead of being quietly published.
 leftovers = sorted({
     term for f in d.iterdir() if f.is_file()
-    for term in list(names) + list(redact)
+    for term in list(names) + list(redact) + list(forbidden)
     if term and term.lower() in f.read_text().lower()
 })
 if leftovers:
     print("REFUSING: identifying terms still present: " + ", ".join(leftovers), file=sys.stderr)
+    print("Add a replacement for each under \"names\" or \"redact\" and run again.",
+          file=sys.stderr)
     sys.exit(1)
-print("anonymization check: clean")
+print(f"anonymization check: clean ({len(forbidden)} forbidden terms verified absent)")
 PY

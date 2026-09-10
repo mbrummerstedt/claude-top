@@ -14,6 +14,15 @@ jobs:
         run: swift build
       - name: Test
         run: swift test
+      - name: Release build
+        run: swift build -c release
+      - name: The binary runs and reports on the runner itself
+        run: |
+          ./.build/release/claude-top --version
+          ./.build/release/claude-top --json > /tmp/snapshot.json
+          python3 -c "import json; d=json.load(open('/tmp/snapshot.json')); \
+            assert d['version'] >= 1; assert d['machine']['cpuCount'] > 0; \
+            print(f\"attributed {len(d['groups'])} groups\")"
 
   # Fixtures are captured from a real machine. This is the backstop for the
   # capture and anonymize scripts: if an identifying detail ever reaches a
@@ -33,5 +42,14 @@ jobs:
           fi
           if [ -f Scripts/anonymize-map.json ]; then
             echo "anonymize-map.json is committed; it is the reverse lookup and must stay untracked"; exit 1
+          fi
+          # The opening prompt is the user's own words. Capture strips it, and the engine
+          # carries it no further than the terminal, so a fixture holding one means both
+          # of those failed.
+          # Only agents.json, because that is where the session prompt would be. Container
+          # names and captured command lines contain the word legitimately.
+          if grep -lq '"name"' Tests/Fixtures/*/agents.json 2>/dev/null; then
+            echo "a fixture's agents.json contains a name, which is the user's opening prompt"
+            exit 1
           fi
           echo "fixtures clean"

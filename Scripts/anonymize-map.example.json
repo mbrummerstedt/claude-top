@@ -15,6 +15,12 @@
     "hand-named-container": "widget-db"
   },
 
+  "_forbidden_comment": [
+    "Terms that must never survive, checked after every other pass. Nothing here is",
+    "rewritten: if one is still present the capture is refused, so put anything you",
+    "would rather fail a build than publish in here as well as in \"names\"."
+  ],
+
   "forbidden": [
     "acme-corp",
     "internal.example.com",

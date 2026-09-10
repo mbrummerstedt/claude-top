@@ -7,7 +7,7 @@ Work top to bottom. Each phase ends with something verifiable from a terminal.
 
 ---
 
-## Phase 1 — ClaudeTopKit
+## Phase 1 — ClaudeTopKit  (done)
 
 The engine. This is the whole value of the project; everything after it is presentation.
 
@@ -116,11 +116,14 @@ Schema is in the spec. System `libsqlite3` through a thin wrapper; no SPM packag
 
 `proc_detail` rows only for keys above 50% CPU, otherwise 24h of history gets large.
 
+A fourth table, `cpu_baseline`, holds the previous tick's cumulative counters. `--sample`
+is a short-lived process and has nothing else to diff against.
+
 Test: write two ticks, read back, confirm pruning drops rows older than 24h.
 
 ---
 
-## Phase 2 — claude-top CLI
+## Phase 2 — claude-top CLI  (done)
 
 Output format is in the spec. Sessions first, then orphans, then everything else. The
 "everything else" section is not optional: the single largest CPU consumer measured was
