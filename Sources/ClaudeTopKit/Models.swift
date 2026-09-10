@@ -26,7 +26,9 @@ public enum AttributionTier: Int, Comparable, Sendable {
     case processTree = 1     // ppid walk from a live session root
     case worktreePath = 2    // PWD or vnode path under .claude/worktrees/
     case containerLabel = 3  // compose working_dir, or testcontainers session-id
-    case none = 4
+    /// No rule fired. Named `unresolved` rather than `none` because `x?.tier == .unresolved`
+    /// compiles against `Optional.none` and silently asks a different question.
+    case unresolved = 4
 
     public static func < (a: Self, b: Self) -> Bool { a.rawValue < b.rawValue }
 }
@@ -116,10 +118,48 @@ public struct MachineInfo: Sendable {
     public let memTotalBytes: UInt64
     public let loadAverage1: Double
     public let capturedAt: Date
+    /// Passed in rather than read, so attribution stays a pure function and a fixture
+    /// captured on one machine still labels correctly when replayed on another.
+    public let homeDirectory: String
 
-    public init(cpuCount: Int, memTotalBytes: UInt64, loadAverage1: Double, capturedAt: Date) {
+    public init(cpuCount: Int, memTotalBytes: UInt64, loadAverage1: Double,
+                capturedAt: Date, homeDirectory: String = NSHomeDirectory()) {
         self.cpuCount = cpuCount; self.memTotalBytes = memTotalBytes
         self.loadAverage1 = loadAverage1; self.capturedAt = capturedAt
+        self.homeDirectory = homeDirectory
+    }
+
+    public var oversubscription: Double {
+        cpuCount > 0 ? loadAverage1 / Double(cpuCount) : 0
+    }
+}
+
+/// One process, resolved. The tier is kept alongside the key so the CLI can explain why
+/// something was charged where it was, and so tests assert the cascade order rather than
+/// only its outcome.
+public struct ProcessAttribution: Sendable, Equatable {
+    public let pid: Int32
+    public let key: AttributionKey
+    public let tier: AttributionTier
+
+    public init(pid: Int32, key: AttributionKey, tier: AttributionTier) {
+        self.pid = pid; self.key = key; self.tier = tier
+    }
+}
+
+public struct ContainerAttribution: Sendable, Equatable {
+    public let containerID: String
+    public let key: AttributionKey
+    public let tier: AttributionTier
+    /// Testcontainers session id, when this container belongs to such a cluster. Set even
+    /// while the cluster itself is unattributed, because the cluster is the unit a person
+    /// reasons about: a database and the reaper that will clean it up.
+    public let clusterID: String?
+
+    public init(containerID: String, key: AttributionKey, tier: AttributionTier,
+                clusterID: String? = nil) {
+        self.containerID = containerID; self.key = key
+        self.tier = tier; self.clusterID = clusterID
     }
 }
 
@@ -148,4 +188,48 @@ public struct Snapshot: Sendable {
     public init(machine: MachineInfo, groups: [AttributionGroup]) {
         self.machine = machine; self.groups = groups
     }
+}
+
+/// One process a reap would signal, carrying the reason it was selected. The reason is
+/// written to `~/.claude/state/reap.log` alongside every kill, so that a reap can be
+/// audited after the fact rather than only trusted before it.
+public struct ReapTarget: Sendable, Equatable {
+    public let pid: Int32
+    public let command: String
+    public let reason: String
+
+    public init(pid: Int32, command: String, reason: String) {
+        self.pid = pid; self.command = command; self.reason = reason
+    }
+}
+
+public struct ReapComposeTarget: Sendable, Equatable {
+    public let containerID: String
+    public let name: String
+    public let workingDirectory: String
+    public let reason: String
+
+    public init(containerID: String, name: String, workingDirectory: String, reason: String) {
+        self.containerID = containerID; self.name = name
+        self.workingDirectory = workingDirectory; self.reason = reason
+    }
+}
+
+/// Deliberately inert. Producing the plan touches nothing; a caller decides whether to
+/// act on it, and `--dry-run` prints one without acting.
+public struct ReapPlan: Sendable, Equatable {
+    public let key: AttributionKey
+    public let processes: [ReapTarget]
+    public let containers: [ReapComposeTarget]
+    /// Set when a `.claude-top-keep` file exempted the worktree, so the CLI can say why
+    /// an obvious candidate produced nothing.
+    public let exemptedByKeepFile: Bool
+
+    public init(key: AttributionKey, processes: [ReapTarget],
+                containers: [ReapComposeTarget], exemptedByKeepFile: Bool = false) {
+        self.key = key; self.processes = processes
+        self.containers = containers; self.exemptedByKeepFile = exemptedByKeepFile
+    }
+
+    public var isEmpty: Bool { processes.isEmpty && containers.isEmpty }
 }

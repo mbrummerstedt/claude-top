@@ -32,21 +32,416 @@ public enum AttributionEngine {
         fatalError("not implemented — see docs/IMPLEMENTATION-PLAN.md 1.4")
     }
 
+    /// Tiers 1 to 3 of the cascade, plus the tier-4 system fallback. One entry per input
+    /// process, always: a process the engine cannot place is still reported, as
+    /// `.system(.other)`, rather than dropped from the totals.
+    public static func resolveProcesses(
+        processes: [ProcessSample],
+        environments: [Int32: ProcessEnvironment],
+        sessions: [SessionInfo]
+    ) -> [Int32: ProcessAttribution] {
+        let liveByPID = Dictionary(sessions.map { ($0.pid, $0) }, uniquingKeysWith: { a, _ in a })
+        var liveByWorktree: [WorktreeID: SessionInfo] = [:]
+        for s in sessions {
+            if let id = worktreeID(forPath: s.cwd) { liveByWorktree[id] = s }
+        }
+
+        let orphanKeys = orphanKeysForDeadSessions(environments: environments, live: liveByPID)
+        var out: [Int32: ProcessAttribution] = [:]
+        out.reserveCapacity(processes.count)
+
+        // Tier 1. The stamp is authoritative: it survives reparenting and it survives the
+        // session dying, which is precisely when the other tiers stop being able to help.
+        for proc in processes {
+            guard let spawner = environments[proc.pid]?.spawningSessionPID else { continue }
+            let key: AttributionKey = liveByPID[spawner]
+                .map { .session(uuid: $0.sessionID) }
+                ?? orphanKeys[spawner]
+                ?? .orphan(repo: "", worktree: "session-\(spawner)")
+            out[proc.pid] = ProcessAttribution(pid: proc.pid, key: key, tier: .envStamp)
+        }
+
+        // Tier 2. Walk to the nearest ancestor that is already placed, or that is a live
+        // session root. This is what catches anything re-exec'd through a shim, which
+        // loses the environment but keeps its parent.
+        let parents = Dictionary(processes.map { ($0.pid, $0.ppid) }, uniquingKeysWith: { a, _ in a })
+        for proc in processes where out[proc.pid] == nil {
+            if let key = ancestorKey(of: proc.pid, parents: parents,
+                                     placed: out, liveByPID: liveByPID) {
+                out[proc.pid] = ProcessAttribution(pid: proc.pid, key: key, tier: .processTree)
+            }
+        }
+
+        // Tier 3. Working directory. Catches the vite and tsx watchers that carry neither
+        // a stamp nor a live ancestor but never left the worktree they were started in.
+        for proc in processes where out[proc.pid] == nil {
+            guard let pwd = environments[proc.pid]?.pwd,
+                  let id = worktreeID(forPath: pwd) else { continue }
+            let key: AttributionKey = liveByWorktree[id]
+                .map { .session(uuid: $0.sessionID) }
+                ?? .orphan(repo: id.repo, worktree: id.worktree)
+            out[proc.pid] = ProcessAttribution(pid: proc.pid, key: key, tier: .worktreePath)
+        }
+
+        // Tier 4. Everything the cascade could not place is still reported, so the totals
+        // add up and so the largest consumer on the machine cannot hide in a gap.
+        for proc in processes where out[proc.pid] == nil {
+            out[proc.pid] = ProcessAttribution(
+                pid: proc.pid,
+                key: .system(family: systemFamily(forCommand: proc.command)),
+                tier: .unresolved)
+        }
+
+        return out
+    }
+
+    /// A worktree, identified the way both a live session and its leftovers see it.
+    struct WorktreeID: Hashable {
+        let repo: String
+        let worktree: String
+    }
+
+    /// The full directory name is kept, hash suffix and all, so two worktrees that differ
+    /// only by suffix never collide into one group. The suffix is dropped for display.
+    static func worktreeID(forPath path: String) -> WorktreeID? {
+        guard let marker = path.range(of: worktreeMarker),
+              let repo = path[path.startIndex..<marker.lowerBound].split(separator: "/").last,
+              let worktree = path[marker.upperBound...].split(separator: "/").first
+        else { return nil }
+        return WorktreeID(repo: String(repo), worktree: String(worktree))
+    }
+
+    /// One orphan key per dead session, chosen once so that every child of that session
+    /// lands in the same group even if some of them have since moved elsewhere on disk.
+    /// Two dead sessions in the same worktree deliberately collapse together: the person
+    /// reading the output has one directory to clean up, not two.
+    private static func orphanKeysForDeadSessions(
+        environments: [Int32: ProcessEnvironment],
+        live: [Int32: SessionInfo]
+    ) -> [Int32: AttributionKey] {
+        var members: [Int32: [Int32]] = [:]
+        for (pid, env) in environments {
+            guard let spawner = env.spawningSessionPID, live[spawner] == nil else { continue }
+            members[spawner, default: []].append(pid)
+        }
+
+        var keys: [Int32: AttributionKey] = [:]
+        for (spawner, pids) in members {
+            // Sorted so the choice of worktree does not depend on dictionary ordering.
+            let candidates = ([spawner] + pids).sorted()
+            let found = candidates.lazy
+                .compactMap { environments[$0]?.pwd }
+                .compactMap(worktreeID(forPath:))
+                .first
+            keys[spawner] = found.map { AttributionKey.orphan(repo: $0.repo, worktree: $0.worktree) }
+                // Nothing left to place it by. Still an orphan, keyed by the session that
+                // spawned it, because "a Claude session died here" is real information and
+                // filing it under system processes is how it stays invisible.
+                ?? .orphan(repo: "", worktree: "session-\(spawner)")
+        }
+        return keys
+    }
+
+    /// Nearest placed ancestor, or the session whose root process is an ancestor.
+    private static func ancestorKey(
+        of pid: Int32,
+        parents: [Int32: Int32],
+        placed: [Int32: ProcessAttribution],
+        liveByPID: [Int32: SessionInfo]
+    ) -> AttributionKey? {
+        var current = pid
+        var seen: Set<Int32> = []
+        // The process table is sampled while it mutates, so a cycle can be observed even
+        // though it cannot exist. A hang here would stall every later sampler tick.
+        while seen.insert(current).inserted, current > 1 {
+            if let live = liveByPID[current] { return .session(uuid: live.sessionID) }
+            if current != pid, let known = placed[current] { return known.key }
+            guard let parent = parents[current] else { return nil }
+            current = parent
+        }
+        return nil
+    }
+
+    /// Tier 4 for containers: compose `working_dir`, then Testcontainers clustering, then
+    /// honest failure. A tier-C container is never reapable by anything.
+    public static func resolveContainers(
+        containers: [ContainerInfo],
+        sessions: [SessionInfo]
+    ) -> [String: ContainerAttribution] {
+        var liveByWorktree: [WorktreeID: SessionInfo] = [:]
+        for s in sessions {
+            if let id = worktreeID(forPath: s.cwd) { liveByWorktree[id] = s }
+        }
+
+        var out: [String: ContainerAttribution] = [:]
+        out.reserveCapacity(containers.count)
+
+        for c in containers {
+            // Tier A. The compose label points at the directory the project was brought
+            // up from, which is frequently a subdirectory of the worktree rather than its
+            // root, so it is resolved to a worktree rather than compared for equality.
+            if let dir = c.composeWorkingDir {
+                if let id = worktreeID(forPath: dir) {
+                    let key: AttributionKey = liveByWorktree[id]
+                        .map { .session(uuid: $0.sessionID) }
+                        ?? .orphan(repo: id.repo, worktree: id.worktree)
+                    out[c.id] = ContainerAttribution(containerID: c.id, key: key,
+                                                     tier: .containerLabel)
+                } else {
+                    // A compose project that is not in a worktree at all. It belongs to
+                    // someone, but nothing here says to whom.
+                    out[c.id] = ContainerAttribution(containerID: c.id, key: .unattributed,
+                                                     tier: .unresolved)
+                }
+                continue
+            }
+
+            // Tier B. Grouped, and honestly unplaced. Reaching a Claude session from here
+            // means finding the process holding a socket to ryuk's published port, which
+            // is a stretch goal rather than something to approximate.
+            if let cluster = testcontainersCluster(of: c) {
+                out[c.id] = ContainerAttribution(containerID: c.id, key: .unattributed,
+                                                 tier: .containerLabel, clusterID: cluster)
+                continue
+            }
+
+            // Tier C. Nothing on it says who wanted it, so nothing may decide it is
+            // disposable.
+            out[c.id] = ContainerAttribution(containerID: c.id, key: .unattributed, tier: .unresolved)
+        }
+        return out
+    }
+
+    /// The Testcontainers session a container belongs to.
+    ///
+    /// The library labels the containers it starts but not the reaper it starts alongside
+    /// them; on the reaper the session id appears only in the name, in a format the
+    /// library itself emits. Reading it there is what lets a database and the thing that
+    /// will clean it up show as one unit, which is the unit a person decides about. This
+    /// is the single place a name is parsed, and it is not a precedent: a compose project
+    /// whose name happens to embed a worktree hash is still attributed from its label.
+    static func testcontainersCluster(of container: ContainerInfo) -> String? {
+        if let id = container.testcontainersSessionID { return id }
+        guard container.isTestcontainersReaper else { return nil }
+        let prefix = "testcontainers-ryuk-"
+        guard container.name.hasPrefix(prefix) else { return nil }
+        let id = String(container.name.dropFirst(prefix.count))
+        return id.isEmpty ? nil : id
+    }
+
+    /// What a reap of `target` would select, and why it selected each thing.
+    ///
+    /// Narrow by construction. Selection is by env stamp for processes and by the compose
+    /// `working_dir` label for containers, and by nothing else. A path match or a ppid
+    /// walk could cross into a session that is still working, which is the one failure
+    /// this tool must never have.
+    public static func reapPlan(
+        for target: AttributionKey,
+        processes: [ProcessSample],
+        environments: [Int32: ProcessEnvironment],
+        containers: [ContainerInfo],
+        sessions: [SessionInfo],
+        keepMarkedWorktrees: Set<String> = []
+    ) -> ReapPlan {
+        // Only work a Claude session is responsible for is reapable. System families and
+        // the unattributed bucket are reported so the totals add up, and that is all.
+        switch target {
+        case .system, .unattributed:
+            return ReapPlan(key: target, processes: [], containers: [])
+        case .session, .orphan:
+            break
+        }
+
+        let targetWorktree = worktree(of: target, sessions: sessions)
+
+        if let wt = targetWorktree,
+           keepMarkedWorktrees.contains(where: { worktreeID(forPath: $0) == wt }) {
+            return ReapPlan(key: target, processes: [], containers: [], exemptedByKeepFile: true)
+        }
+
+        let attribution = resolveProcesses(processes: processes, environments: environments,
+                                           sessions: sessions)
+
+        // Env stamp only. A process resolved by its path might be the person's own editor
+        // sitting in the worktree, and one resolved by its parent might have been adopted
+        // from somewhere else entirely. Neither is a good enough reason to signal it.
+        //
+        // The narrowness is deliberate and it costs something: unstamped children are not
+        // signalled directly. In practice signalling the parent is what stops them, and a
+        // Postgres postmaster shuts its workers down more cleanly than anything reaching
+        // past it could.
+        var processTargets: [ReapTarget] = []
+        for proc in processes {
+            guard let placed = attribution[proc.pid],
+                  placed.key == target,
+                  placed.tier == .envStamp,
+                  let spawner = environments[proc.pid]?.spawningSessionPID
+            else { continue }
+            processTargets.append(ReapTarget(
+                pid: proc.pid, command: proc.command,
+                reason: "CLAUDE_CODE_MESSAGING_SOCKET names session \(spawner)"))
+        }
+
+        // Compose label only. A testcontainers cluster has its own reaper and racing it
+        // achieves nothing, and an unlabelled container is never eligible for anything.
+        var containerTargets: [ReapComposeTarget] = []
+        if let wt = targetWorktree {
+            for c in containers {
+                guard let dir = c.composeWorkingDir, worktreeID(forPath: dir) == wt else { continue }
+                containerTargets.append(ReapComposeTarget(
+                    containerID: c.id, name: c.name, workingDirectory: dir,
+                    reason: "compose working_dir is \(wt.repo)::\(wt.worktree)"))
+            }
+        }
+
+        return ReapPlan(key: target, processes: processTargets.sorted { $0.pid < $1.pid },
+                        containers: containerTargets.sorted { $0.containerID < $1.containerID })
+    }
+
+    /// The worktree a key owns, when it owns one. An orphan keyed only by its dead
+    /// session's pid owns no directory, so nothing on disk can be matched against it.
+    private static func worktree(of key: AttributionKey,
+                                 sessions: [SessionInfo]) -> WorktreeID? {
+        switch key {
+        case .session(let uuid):
+            return sessions.first { $0.sessionID == uuid }
+                .flatMap { worktreeID(forPath: $0.cwd) }
+        case .orphan(let repo, let worktree):
+            return repo.isEmpty ? nil : WorktreeID(repo: repo, worktree: worktree)
+        case .system, .unattributed:
+            return nil
+        }
+    }
+
+    /// Family from the executable path only. Deliberately not from the whole command
+    /// line: a shell script that merely mentions `docker` in an argument is not Docker,
+    /// and the reference capture contains exactly that.
+    public static func systemFamily(forCommand command: String) -> SystemFamily {
+        for (prefix, family) in bundleFamilies where command.hasPrefix(prefix) { return family }
+
+        // Docker's helpers do not all live inside the bundle. Match the executable's own
+        // name, never a word in the arguments: the reference capture holds shell
+        // one-liners mentioning `docker`, and filing those under Docker would inflate the
+        // largest bucket on the machine with things that are not Docker.
+        let executable = command.prefix { $0 != " " }
+        let name = executable.split(separator: "/").last.map(String.init) ?? ""
+        if name.hasPrefix("com.docker.") { return .docker }
+
+        return .other
+    }
+
+    private static let bundleFamilies: [(String, SystemFamily)] = [
+        ("/Applications/Google Chrome.app/", .chrome),
+        ("/Applications/Docker.app/", .docker),
+        ("/Applications/Claude.app/", .claudeDesktop),
+    ]
+
+    /// Human-readable name for a key, given the machine it was captured on.
+    public static func label(for key: AttributionKey, sessions: [SessionInfo],
+                             machine: MachineInfo) -> String {
+        switch key {
+        case .session(let uuid):
+            guard let s = sessions.first(where: { $0.sessionID == uuid }) else {
+                return "session \(uuid.prefix(8))"
+            }
+            if s.cwd == machine.homeDirectory { return "~" }
+            return worktreeLabel(forPath: s.cwd) ?? "session \(uuid.prefix(8))"
+
+        case .orphan(let repo, let worktree):
+            if repo.isEmpty { return "orphaned \(worktree)" }
+            if worktree.isEmpty { return repo }
+            return "\(repo)::\(strippingWorktreeHash(worktree))"
+
+        case .system(let family):
+            switch family {
+            case .docker: return "Docker"
+            case .chrome: return "Chrome"
+            case .claudeDesktop: return "Claude desktop app"
+            case .other: return "Other processes"
+            }
+
+        case .unattributed:
+            return "Unattributed"
+        }
+    }
+
     /// Interval CPU percentage from two snapshots' cumulative CPU times.
     ///
-    /// Must tolerate PIDs appearing and disappearing between samples, and a non-monotonic
-    /// wall clock. Returns one entry per PID present in `later`.
+    /// One entry per PID in `later`. An empty result means the interval itself was
+    /// unusable, which a caller renders as unknown rather than as zero: a missing entry
+    /// carries the same meaning as a nil `ContainerInfo.cpuPercent`.
     public static func cpuPercents(
         earlier: [ProcessSample], earlierAt: Date,
         later: [ProcessSample], laterAt: Date
     ) -> [Int32: Double] {
-        fatalError("not implemented — see docs/IMPLEMENTATION-PLAN.md 1.6")
+        let elapsed = laterAt.timeIntervalSince(earlierAt)
+        guard elapsed > 0 else { return [:] }
+
+        let baseline = Dictionary(earlier.map { ($0.pid, $0) }, uniquingKeysWith: { a, _ in a })
+
+        var out: [Int32: Double] = [:]
+        out.reserveCapacity(later.count)
+        for proc in later {
+            let consumed: TimeInterval
+            let over: TimeInterval
+
+            if let was = baseline[proc.pid], isSameProcess(was, proc) {
+                consumed = proc.cpuTime - was.cpuTime
+                over = elapsed
+            } else {
+                // Either newly spawned or a recycled PID. Both are measured from this
+                // process's own start, never diffed against whatever held the PID before:
+                // on a machine at load 55 PIDs recycle within minutes, and that diff
+                // would come out negative.
+                consumed = proc.cpuTime
+                let sinceBirth = laterAt.timeIntervalSince(proc.startedAt)
+                over = sinceBirth > 0 && sinceBirth < elapsed ? sinceBirth : elapsed
+            }
+
+            out[proc.pid] = consumed > 0 ? (consumed / over) * 100 : 0
+        }
+        return out
+    }
+
+    /// Same PID plus same start time. The start time is what distinguishes a long-lived
+    /// process from a new one that inherited its PID.
+    private static func isSameProcess(_ a: ProcessSample, _ b: ProcessSample) -> Bool {
+        // One second of tolerance, because a start time that has been through the SQLite
+        // store has lost its sub-second precision.
+        abs(a.startedAt.timeIntervalSince(b.startedAt)) < 1
     }
 
     /// `<repo>::<worktree>` for a path under `<repo>/.claude/worktrees/<worktree>`,
     /// otherwise the basename. Used for both session and orphan labels, so a dead
     /// session's leftovers line up with the session that spawned them.
     public static func worktreeLabel(forPath path: String) -> String? {
-        fatalError("not implemented — see docs/IMPLEMENTATION-PLAN.md 1.3")
+        let trimmed = path.hasSuffix("/") ? String(path.reversed().drop { $0 == "/" }.reversed()) : path
+        guard !trimmed.isEmpty else { return nil }
+
+        guard let marker = trimmed.range(of: worktreeMarker) else {
+            let base = trimmed.split(separator: "/").last
+            return base.map(String.init)
+        }
+        guard let repo = trimmed[trimmed.startIndex..<marker.lowerBound]
+                .split(separator: "/").last,
+              let worktree = trimmed[marker.upperBound...]
+                .split(separator: "/").first
+        else { return nil }
+
+        return "\(repo)::\(strippingWorktreeHash(String(worktree)))"
+    }
+
+    static let worktreeMarker = "/.claude/worktrees/"
+
+    /// Worktree directories carry a six-hex-character suffix appended by the tooling that
+    /// created them. It disambiguates the directory, not the work, so it is dropped for
+    /// display while the full directory name stays in the attribution key.
+    static func strippingWorktreeHash(_ name: String) -> String {
+        guard let dash = name.lastIndex(of: "-") else { return name }
+        let suffix = name[name.index(after: dash)...]
+        guard suffix.count == 6,
+              suffix.allSatisfy({ $0.isHexDigit && !$0.isUppercase })
+        else { return name }
+        return String(name[name.startIndex..<dash])
     }
 }
