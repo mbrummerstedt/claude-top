@@ -189,7 +189,7 @@ Nothing leaves your machine. There is no telemetry and no network code.
 ## Development
 
 ```bash
-swift test          # 189 tests, most against a committed capture
+swift test          # 191 tests, most against a committed capture
 swift build -c release
 ```
 

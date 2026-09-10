@@ -19,7 +19,7 @@ public enum ProcessTable {
             // Short reads mean the process exited mid-listing, which happens constantly.
             guard read == wanted else { return nil }
 
-            let nanoseconds = Double(info.ptinfo.pti_total_user) + Double(info.ptinfo.pti_total_system)
+            let ticks = Double(info.ptinfo.pti_total_user) + Double(info.ptinfo.pti_total_system)
             let started = Double(info.pbsd.pbi_start_tvsec)
                 + Double(info.pbsd.pbi_start_tvusec) / 1_000_000
 
@@ -27,11 +27,27 @@ public enum ProcessTable {
                 pid: pid,
                 ppid: Int32(bitPattern: info.pbsd.pbi_ppid),
                 rssBytes: info.ptinfo.pti_resident_size,
-                cpuTime: nanoseconds / 1_000_000_000,
+                cpuTime: ticks * secondsPerMachTick,
                 startedAt: Date(timeIntervalSince1970: started),
                 command: commands[pid] ?? executablePath(of: pid) ?? processName(of: info))
         }
     }
+
+    /// `pti_total_user` and `pti_total_system` are mach absolute time units, not
+    /// nanoseconds, whatever their names suggest.
+    ///
+    /// On Intel the timebase is 1:1 and treating them as nanoseconds happens to be right.
+    /// On Apple Silicon a tick is 125/3 nanoseconds, so the same code understates every
+    /// process's CPU by a factor of nearly 42, and it does so quietly: the numbers still
+    /// look like plausible percentages, they are just all far too small. Caught by asking
+    /// `ps` what it thought the same process had used.
+    private static let secondsPerMachTick: Double = {
+        var timebase = mach_timebase_info_data_t()
+        guard mach_timebase_info(&timebase) == KERN_SUCCESS, timebase.denom != 0 else {
+            return 1.0 / 1_000_000_000
+        }
+        return Double(timebase.numer) / Double(timebase.denom) / 1_000_000_000
+    }()
 
     public static func listPIDs() -> [Int32] {
         let needed = proc_listpids(UInt32(PROC_ALL_PIDS), 0, nil, 0)
