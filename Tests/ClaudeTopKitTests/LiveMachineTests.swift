@@ -40,6 +40,48 @@ struct LiveMachineTests {
         #expect(environments[me]?.pwd != nil, "own PWD came back empty")
     }
 
+    @Test("Cumulative CPU time is in seconds, not in mach ticks")
+    func cpuTimeIsInSeconds() {
+        // The unit this whole tool ranks on. `pti_total_user` and `pti_total_system` are
+        // mach absolute time units, and on Apple Silicon a tick is 125/3 nanoseconds, so
+        // reading them as nanoseconds understates every process by nearly 42x. On Intel
+        // the timebase is 1:1 and the mistake is invisible, which is how it survives.
+        //
+        // Measured against this process, so it does not depend on what else is running.
+        let me = getpid()
+        func consumedByThisProcess() -> TimeInterval {
+            ProcessTable.current().first { $0.pid == me }?.cpuTime ?? 0
+        }
+
+        let before = consumedByThisProcess()
+        let deadline = Date().addingTimeInterval(1.0)
+        var sink = 0.0
+        while Date() < deadline { sink += 1 }
+        _ = sink
+        let consumed = consumedByThisProcess() - before
+
+        // A second of wall time spent spinning is at most a second of CPU, and on a
+        // machine already at three times its core count it is closer to half of that.
+        // The bound is set to tolerate contention while staying an order of magnitude
+        // above where the tick error lands, which is 0.024s.
+        #expect(consumed > 0.2, "one second of spinning was recorded as \(consumed)s of CPU")
+        #expect(consumed < 3.0, "one second of spinning was recorded as \(consumed)s of CPU")
+    }
+
+    @Test("Cumulative CPU time agrees with what ps reports for the same process")
+    func cpuTimeAgreesWithPS() throws {
+        // A second opinion from a tool that has been right about this since 1979.
+        let heaviest = try #require(ProcessTable.current().max { $0.cpuTime < $1.cpuTime })
+        let reported = try #require(Shell.run("/bin/ps", ["-o", "time=", "-p", "\(heaviest.pid)"],
+                                              timeout: 5))
+        let fromPS = Fixture.parseCPUTime(reported.trimmingCharacters(in: .whitespacesAndNewlines))
+        try #require(fromPS > 1, "no process on this machine has enough CPU time to compare")
+
+        let difference = abs(heaviest.cpuTime - fromPS) / fromPS
+        #expect(difference < 0.05,
+                "libproc says \(heaviest.cpuTime)s, ps says \(fromPS)s")
+    }
+
     @Test("The machine probe reports a real machine")
     func machineProbe() {
         let m = MachineProbe.current()

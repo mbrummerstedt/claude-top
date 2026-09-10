@@ -97,6 +97,7 @@ It writes one file, `~/Library/LaunchAgents/com.claudetop.sampler.plist`.
 | `claude-top --sample` | One sampler tick; what the LaunchAgent runs |
 | `claude-top --statusline` | One line for a shell prompt |
 | `claude-top --reap` | Stop the leftovers of sessions that are gone |
+| `claude-top --hook <event>` | Guardrail hooks; see [docs/HOOKS.md](docs/HOOKS.md) |
 
 There is no full-screen auto-refreshing TUI, deliberately. At load 55 the thing you open to
 diagnose the problem should not be competing for the cores you are trying to free, and
@@ -133,6 +134,15 @@ Every group says whether it can safely be stopped and which PIDs that would mean
 It reads the newest stored row rather than sampling, so it costs one indexed query and
 runs in about 10ms. This is the part Activity Monitor structurally cannot provide, because
 it has no concept of "this session".
+
+## Guardrails
+
+Two optional hooks, in [docs/HOOKS.md](docs/HOOKS.md). One warns when a session opens on a
+machine that is already oversubscribed. The other caps test-runner workers while load is
+above twice the core count, because a single `vitest` run defaults to one worker per core
+and can saturate a machine by itself.
+
+Both are narrow and both announce themselves. Neither is installed for you.
 
 ## Reaping is narrow on purpose
 
@@ -179,7 +189,7 @@ Nothing leaves your machine. There is no telemetry and no network code.
 ## Development
 
 ```bash
-swift test          # 169 tests, most against a committed capture
+swift test          # 191 tests, most against a committed capture
 swift build -c release
 ```
 
@@ -200,7 +210,7 @@ for why each structural choice was made.
 
 ## Status
 
-The engine and the CLI work and are in daily use. The menu bar app is not built yet.
+The engine, the CLI and the guardrail hooks work. The menu bar app is not built yet.
 
 ## License
 
