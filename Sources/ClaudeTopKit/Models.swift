@@ -121,12 +121,20 @@ public struct MachineInfo: Sendable {
     /// Passed in rather than read, so attribution stays a pure function and a fixture
     /// captured on one machine still labels correctly when replayed on another.
     public let homeDirectory: String
+    /// Every process the kernel listed, including the ones this user may not inspect.
+    /// macOS allows reading task info only for your own processes, so roughly a third of
+    /// a Mac's process table is invisible here. That costs nothing worth having: Claude
+    /// spawns nothing as root, and a root daemon is not something a session could stop
+    /// anyway. It is recorded so the output can say what it did not see instead of
+    /// implying the breakdown is complete.
+    public let processCount: Int
 
     public init(cpuCount: Int, memTotalBytes: UInt64, loadAverage1: Double,
-                capturedAt: Date, homeDirectory: String = NSHomeDirectory()) {
+                capturedAt: Date, homeDirectory: String = NSHomeDirectory(),
+                processCount: Int = 0) {
         self.cpuCount = cpuCount; self.memTotalBytes = memTotalBytes
         self.loadAverage1 = loadAverage1; self.capturedAt = capturedAt
-        self.homeDirectory = homeDirectory
+        self.homeDirectory = homeDirectory; self.processCount = processCount
     }
 
     public var oversubscription: Double {
@@ -164,29 +172,82 @@ public struct ContainerAttribution: Sendable, Equatable {
 }
 
 /// One attributed group, ready to render or store.
+///
+/// Process figures and container figures are kept apart on purpose. On macOS every
+/// container runs inside Docker's virtual machine, so a container's CPU and memory are
+/// already counted in `com.docker.krun`'s. Adding them into a session's totals would
+/// count the same 2.3 GB twice and make attributed memory exceed what the machine has.
 public struct AttributionGroup: Sendable {
     public let key: AttributionKey
     public let label: String
+    /// The highest-priority rule that placed any member, so the CLI can say how much
+    /// confidence the row deserves.
     public let tier: AttributionTier
-    public let cpuPercent: Double
+    /// Process CPU across the sampling interval. nil when the interval itself was
+    /// unusable, which is reported as unknown rather than as zero.
+    public let cpuPercent: Double?
     public let rssBytes: UInt64
+    /// Container CPU, when `docker stats` answered. Never added to `cpuPercent`.
+    public let containerCPUPercent: Double?
+    /// Container memory, when `docker stats` answered. Never added to `rssBytes`.
+    public let containerRSSBytes: UInt64?
     public let pids: [Int32]
     public let containerIDs: [String]
 
     public init(key: AttributionKey, label: String, tier: AttributionTier,
-                cpuPercent: Double, rssBytes: UInt64, pids: [Int32], containerIDs: [String]) {
+                cpuPercent: Double?, rssBytes: UInt64,
+                containerCPUPercent: Double? = nil, containerRSSBytes: UInt64? = nil,
+                pids: [Int32], containerIDs: [String]) {
         self.key = key; self.label = label; self.tier = tier
         self.cpuPercent = cpuPercent; self.rssBytes = rssBytes
+        self.containerCPUPercent = containerCPUPercent
+        self.containerRSSBytes = containerRSSBytes
         self.pids = pids; self.containerIDs = containerIDs
     }
 }
 
+/// Groups are ordered the way they are read: live sessions first, then the leftovers of
+/// sessions that are gone, then everything else, each block by CPU descending. That order
+/// is part of the `--json` contract as much as it is a rendering choice.
 public struct Snapshot: Sendable {
     public let machine: MachineInfo
     public let groups: [AttributionGroup]
 
     public init(machine: MachineInfo, groups: [AttributionGroup]) {
         self.machine = machine; self.groups = groups
+    }
+
+    public var sessions: [AttributionGroup] {
+        groups.filter { if case .session = $0.key { return true } else { return false } }
+    }
+
+    public var orphans: [AttributionGroup] {
+        groups.filter { if case .orphan = $0.key { return true } else { return false } }
+    }
+
+    public var everythingElse: [AttributionGroup] {
+        groups.filter {
+            switch $0.key {
+            case .session, .orphan: return false
+            case .system, .unattributed: return true
+            }
+        }
+    }
+
+    /// Process memory only. Container memory is excluded because it is already inside the
+    /// Docker VM process's, and this total is checked against what the machine has.
+    public var attributedRSSBytes: UInt64 {
+        groups.reduce(0) { $0 + $1.rssBytes }
+    }
+
+    public var attributedProcessCount: Int {
+        groups.reduce(0) { $0 + $1.pids.count }
+    }
+
+    /// Processes the kernel listed that this user may not inspect: other users' and the
+    /// system's. Reported rather than quietly dropped.
+    public var unreadableProcessCount: Int {
+        max(0, machine.processCount - attributedProcessCount)
     }
 }
 

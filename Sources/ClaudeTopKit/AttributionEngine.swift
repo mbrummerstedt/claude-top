@@ -29,7 +29,82 @@ public enum AttributionEngine {
         cpuPercents: [Int32: Double],
         machine: MachineInfo
     ) -> Snapshot {
-        fatalError("not implemented — see docs/IMPLEMENTATION-PLAN.md 1.4")
+        let byProcess = resolveProcesses(processes: processes, environments: environments,
+                                         sessions: sessions)
+        let byContainer = resolveContainers(containers: containers, sessions: sessions)
+
+        let processByPID = Dictionary(processes.map { ($0.pid, $0) }, uniquingKeysWith: { a, _ in a })
+        let containerByID = Dictionary(containers.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+
+        var members: [AttributionKey: (pids: [Int32], containers: [String], tier: AttributionTier)] = [:]
+        for (pid, placed) in byProcess {
+            var entry = members[placed.key] ?? ([], [], .unresolved)
+            entry.pids.append(pid)
+            entry.tier = min(entry.tier, placed.tier)
+            members[placed.key] = entry
+        }
+        for (id, placed) in byContainer {
+            var entry = members[placed.key] ?? ([], [], .unresolved)
+            entry.containers.append(id)
+            entry.tier = min(entry.tier, placed.tier)
+            members[placed.key] = entry
+        }
+
+        // An empty map means the interval was unusable, not that nothing ran. Zero would
+        // rank a busy session at the bottom of the list, which is the worst possible
+        // answer to give someone deciding what to stop.
+        let intervalUsable = !cpuPercents.isEmpty
+
+        let groups: [AttributionGroup] = members.map { key, entry in
+            let pids = entry.pids.sorted()
+            let containerIDs = entry.containers.sorted()
+
+            let rss = pids.reduce(UInt64(0)) { $0 + (processByPID[$1]?.rssBytes ?? 0) }
+            let cpu = intervalUsable
+                ? pids.reduce(0.0) { $0 + (cpuPercents[$1] ?? 0) }
+                : nil
+
+            // Containers report unknown as a whole when docker could not answer, rather
+            // than summing the ones that did into a figure that looks complete.
+            let stats = containerIDs.compactMap { containerByID[$0] }
+            let containerCPU = stats.allSatisfy { $0.cpuPercent != nil } && !stats.isEmpty
+                ? stats.reduce(0.0) { $0 + ($1.cpuPercent ?? 0) }
+                : nil
+            let containerRSS = stats.allSatisfy { $0.rssBytes != nil } && !stats.isEmpty
+                ? stats.reduce(UInt64(0)) { $0 + ($1.rssBytes ?? 0) }
+                : nil
+
+            return AttributionGroup(
+                key: key,
+                label: label(for: key, sessions: sessions, machine: machine),
+                tier: entry.tier,
+                cpuPercent: cpu, rssBytes: rss,
+                containerCPUPercent: containerCPU, containerRSSBytes: containerRSS,
+                pids: pids, containerIDs: containerIDs)
+        }
+
+        return Snapshot(machine: machine, groups: groups.sorted(by: ordered))
+    }
+
+    /// Live sessions, then the leftovers of sessions that are gone, then everything else,
+    /// each block heaviest first. The blocks answer "which of my sessions is this" before
+    /// "what is using the most CPU", because the first question is the one a person opens
+    /// this tool with.
+    private static func ordered(_ a: AttributionGroup, _ b: AttributionGroup) -> Bool {
+        func rank(_ key: AttributionKey) -> Int {
+            switch key {
+            case .session: return 0
+            case .orphan: return 1
+            case .system: return 2
+            case .unattributed: return 3
+            }
+        }
+        let (ra, rb) = (rank(a.key), rank(b.key))
+        if ra != rb { return ra < rb }
+        let (ca, cb) = (a.cpuPercent ?? -1, b.cpuPercent ?? -1)
+        if ca != cb { return ca > cb }
+        if a.rssBytes != b.rssBytes { return a.rssBytes > b.rssBytes }
+        return a.label < b.label
     }
 
     /// Tiers 1 to 3 of the cascade, plus the tier-4 system fallback. One entry per input
