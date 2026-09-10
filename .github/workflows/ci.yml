@@ -28,7 +28,7 @@ jobs:
           if grep -rqE '(^|[^A-Za-z0-9-])(sk-[A-Za-z0-9]{16}|ghp_[A-Za-z0-9]{20}|AKIA[0-9A-Z]{16})|BEGIN [A-Z ]*PRIVATE KEY' Tests/Fixtures/; then
             echo "secret-shaped content in fixtures"; exit 1
           fi
-          if grep -rqE '/Users/(?!USER)[A-Za-z0-9_.-]+' -P Tests/Fixtures/; then
+          if grep -rqP '/Users/(?!USER)[A-Za-z0-9_.-]+' Tests/Fixtures/; then
             echo "un-rewritten home directory in fixtures"; exit 1
           fi
           if [ -f Scripts/anonymize-map.json ]; then
