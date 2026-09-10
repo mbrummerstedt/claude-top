@@ -27,7 +27,7 @@ struct FixtureIntegrityTests {
     @Test("Process table parses and carries usable CPU time")
     func processTable() throws {
         let procs = try Fixture.processes()
-        #expect(procs.count > 600)
+        #expect(procs.count == 662)
         #expect(procs.allSatisfy { $0.cpuTime >= 0 })
         #expect(procs.contains { $0.pid == 1 })          // launchd
         #expect(procs.contains { $0.cpuTime > 60 })      // something long-running
