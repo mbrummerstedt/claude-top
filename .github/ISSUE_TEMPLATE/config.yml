@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security issue
+    url: https://github.com/mbrummerstedt/claude-top/security/advisories/new
+    about: Anything involving reading process memory, or a reap selecting outside its own session. Please do not open a public issue.

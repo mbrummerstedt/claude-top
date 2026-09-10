@@ -140,6 +140,9 @@ enum Fixture {
             cpuCount: Int(kv["ncpu"] ?? "") ?? 0,
             memTotalBytes: UInt64(kv["memtotal_bytes"] ?? "") ?? 0,
             loadAverage1: load,
-            capturedAt: kv["captured_at"].flatMap { fmt.date(from: $0) } ?? Date())
+            capturedAt: kv["captured_at"].flatMap { fmt.date(from: $0) } ?? Date(),
+            // Captures rewrite the real home to /Users/USER. Passing it explicitly keeps
+            // labelling identical no matter whose machine replays the fixture.
+            homeDirectory: kv["home"] ?? "/Users/USER")
     }
 }

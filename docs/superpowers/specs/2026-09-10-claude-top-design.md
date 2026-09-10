@@ -149,6 +149,15 @@ Live sessions come from `claude agents --json`, which returns `pid`, `cwd`, `ses
 `startedAt` and the opening prompt as a name. That is the authoritative roster; the cascade
 only has to explain the processes.
 
+A Mac can carry more than one `claude` install, and an older one answers `agents --json`
+with "unknown option" rather than with sessions. Taking that failure as "no sessions are
+running" files every live session as an orphan, so every candidate on `PATH` is tried
+until one answers with a JSON array.
+
+The prompt reaches the terminal table, where it is the only thing distinguishing sessions
+started outside a worktree, and goes no further: not the database, not `--json`, not the
+reap log, not a fixture.
+
 ### Container attribution
 
 Measured on the fixture: 7 of 13 containers map cleanly, 6 do not. The design is honest
@@ -158,7 +167,10 @@ about the remainder rather than guessing.
   worktree path. Covers 7 of 13 here, including
   `account-deletion-d7fb2e-db-1`, whose name even embeds the worktree hash.
 - **Tier B, Testcontainers.** Containers carrying `org.testcontainers.session-id` cluster
-  with their `testcontainers/ryuk` reaper, which shares the id. Covers 5 of the remaining 6.
+  with their `testcontainers/ryuk` reaper. The reaper carries no session-id label of its
+  own; the id appears only in its name, `testcontainers-ryuk-<uuid>`, in a format the
+  library emits. That is the one place in the engine a name is parsed. Covers 5 of the
+  remaining 6.
   Shown as one unit per testcontainers session. Resolving that cluster to a Claude session
   requires finding the process holding a socket to ryuk's published port, which is a
   stretch goal, not v1. Until then the cluster is shown grouped and unattributed.
@@ -198,6 +210,13 @@ CREATE TABLE attribution (ts INTEGER, key TEXT, label TEXT, kind TEXT,
 -- so 24h of history stays small
 CREATE TABLE proc_detail (ts INTEGER, key TEXT, pid INTEGER,
                           cpu_pct REAL, rss_mb INTEGER, cmd TEXT);
+
+-- The previous tick's raw cumulative counters, one row per process, replaced wholesale
+-- each tick. The sampler is a short-lived process, so without somewhere to leave these
+-- it has nothing to diff against and could only report the lifetime averages this whole
+-- design exists to avoid.
+CREATE TABLE cpu_baseline (pid INTEGER PRIMARY KEY, ts REAL,
+                           cpu_time REAL, started_at REAL);
 ```
 
 About 30 keys at 4 samples/minute is ~173k attribution rows/day. Detail rows only for keys
@@ -365,3 +384,6 @@ attributed RSS never exceeds machine total.
    rule, or should phase 4 stop at `--reap` plus warnings?
 3. Developer ID certificate: worth the paid program for a personal tool, or is development
    signing plus a local install enough?
+
+Question 1 is settled: CLI first, and the CLI is built. Question 2 is still open and
+phase 4 stops at manual `--reap` plus warnings until it is answered.
