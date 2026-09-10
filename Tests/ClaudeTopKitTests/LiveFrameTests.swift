@@ -197,6 +197,42 @@ struct LiveFrameTests {
         #expect(text.contains("?"))
     }
 
+    @Test("A heavy session says what it is made of")
+    func heavySessionBreakdown() {
+        // The line the original design mocked up, and the difference between knowing a
+        // session is heavy and knowing what to stop.
+        let heavy = AttributionGroup(
+            key: .session(uuid: "a"), label: "reader-app::terms-page", tier: .envStamp,
+            cpuPercent: 291, rssBytes: 294_649_856,
+            pids: Array(Int32(100)...Int32(108)), containerIDs: [],
+            breakdown: [ProcessKind(name: "vitest", count: 9, cpuPercent: 287,
+                                    rssBytes: 200_000_000, pids: [])])
+        let text = frame([heavy])
+        #expect(text.contains("9x vitest"))
+        #expect(text.contains("287%"))
+    }
+
+    @Test("A session that is not busy is not taken apart")
+    func quietSessionIsNotExpanded() {
+        // Every group expanded is a screen of noise. Half a core is the threshold.
+        let quiet = AttributionGroup(
+            key: .session(uuid: "a"), label: "r::w", tier: .envStamp, cpuPercent: 4,
+            rssBytes: 1024, pids: [1, 2], containerIDs: [],
+            breakdown: [ProcessKind(name: "vitest", count: 2, cpuPercent: 4,
+                                    rssBytes: 1024, pids: [])])
+        #expect(!frame([quiet]).contains("vitest"))
+    }
+
+    @Test("A group running one of everything gets no breakdown")
+    func nothingToSayIsNotSaid() {
+        let varied = AttributionGroup(
+            key: .session(uuid: "a"), label: "r::w", tier: .envStamp, cpuPercent: 200,
+            rssBytes: 1024, pids: [1], containerIDs: [],
+            breakdown: [ProcessKind(name: "node", count: 1, cpuPercent: 200,
+                                    rssBytes: 1024, pids: [1])])
+        #expect(!frame([varied]).contains("└"))
+    }
+
     @Test("The header carries load, cores and oversubscription")
     func header() {
         let text = frame([])

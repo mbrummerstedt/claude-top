@@ -11,7 +11,8 @@ public enum ProcessTable {
     /// Cumulative CPU time is the field that matters. `ps` reports `%cpu` averaged over a
     /// process's whole life, so a session that finished a test run an hour ago outranks
     /// the one currently saturating a core. Interval percentages come from diffing this.
-    public static func current(commands: [Int32: String] = [:]) -> [ProcessSample] {
+    public static func current(commands: [Int32: String] = [:],
+                               arguments: [Int32: [String]] = [:]) -> [ProcessSample] {
         listPIDs().compactMap { pid in
             var info = proc_taskallinfo()
             let wanted = Int32(MemoryLayout<proc_taskallinfo>.size)
@@ -29,7 +30,8 @@ public enum ProcessTable {
                 rssBytes: info.ptinfo.pti_resident_size,
                 cpuTime: ticks * secondsPerMachTick,
                 startedAt: Date(timeIntervalSince1970: started),
-                command: commands[pid] ?? executablePath(of: pid) ?? processName(of: info))
+                command: commands[pid] ?? executablePath(of: pid) ?? processName(of: info),
+                arguments: arguments[pid] ?? [])
         }
     }
 

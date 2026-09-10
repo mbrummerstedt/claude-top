@@ -31,11 +31,11 @@ public enum Sampler {
 
     public static func collect(timeout: TimeInterval = 3) -> RawSample {
         let pids = ProcessTable.listPIDs()
-        let (environments, commands) = ProcessEnvironmentReader.read(pids: pids)
+        let (environments, commands, arguments) = ProcessEnvironmentReader.read(pids: pids)
 
         // Read last among the process work and timestamped immediately, so the interval
         // the CPU percentages are divided by is the one the counters actually span.
-        let processes = ProcessTable.current(commands: commands)
+        let processes = ProcessTable.current(commands: commands, arguments: arguments)
         let readAt = Date()
 
         return RawSample(

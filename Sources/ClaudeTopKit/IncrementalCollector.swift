@@ -12,11 +12,13 @@ import Foundation
 /// worth reading, and on a steady machine that is almost none of them.
 public final class IncrementalCollector {
 
-    private let readTable: ([Int32: String]) -> [ProcessSample]
-    private let readEnvironments: ([Int32]) -> ([Int32: ProcessEnvironment], [Int32: String])
+    private let readTable: ([Int32: String], [Int32: [String]]) -> [ProcessSample]
+    private let readEnvironments: ([Int32]) -> ([Int32: ProcessEnvironment],
+                                                [Int32: String], [Int32: [String]])
 
     private var environments: [Int32: ProcessEnvironment] = [:]
     private var commands: [Int32: String] = [:]
+    private var arguments: [Int32: [String]] = [:]
     /// What each cached pid was when it was read. A pid whose start time has moved is a
     /// different process wearing the same number.
     private var startTimes: [Int32: Date] = [:]
@@ -24,8 +26,10 @@ public final class IncrementalCollector {
     public var cachedProcessCount: Int { environments.count }
 
     public init(
-        readTable: @escaping ([Int32: String]) -> [ProcessSample] = ProcessTable.current,
-        readEnvironments: @escaping ([Int32]) -> ([Int32: ProcessEnvironment], [Int32: String])
+        readTable: @escaping ([Int32: String], [Int32: [String]]) -> [ProcessSample]
+            = ProcessTable.current,
+        readEnvironments: @escaping ([Int32]) -> ([Int32: ProcessEnvironment],
+                                                  [Int32: String], [Int32: [String]])
             = { ProcessEnvironmentReader.read(pids: $0) }
     ) {
         self.readTable = readTable
@@ -37,7 +41,7 @@ public final class IncrementalCollector {
     public func collect(containers: [ContainerInfo] = [], roster: Roster? = nil,
                         timeout: TimeInterval = 3) -> RawSample {
         // Cheap, and the only part that has to happen every tick.
-        var table = readTable(commands)
+        var table = readTable(commands, arguments)
         let readAt = Date()
 
         let unknown = table.filter { process in
@@ -47,10 +51,11 @@ public final class IncrementalCollector {
         }.map(\.pid)
 
         if !unknown.isEmpty {
-            let (freshEnvironments, freshCommands) = readEnvironments(unknown)
+            let (freshEnvironments, freshCommands, freshArguments) = readEnvironments(unknown)
             for pid in unknown {
                 environments[pid] = freshEnvironments[pid]
                 commands[pid] = freshCommands[pid]
+                arguments[pid] = freshArguments[pid]
             }
             // The table was built with whatever commands were cached, so the ones just
             // read have to be put back into it.
@@ -58,7 +63,8 @@ public final class IncrementalCollector {
                 guard let command = freshCommands[process.pid] else { return process }
                 return ProcessSample(pid: process.pid, ppid: process.ppid,
                                      rssBytes: process.rssBytes, cpuTime: process.cpuTime,
-                                     startedAt: process.startedAt, command: command)
+                                     startedAt: process.startedAt, command: command,
+                                     arguments: freshArguments[process.pid] ?? [])
             }
         }
 
@@ -67,6 +73,7 @@ public final class IncrementalCollector {
         let living = Set(table.map(\.pid))
         environments = environments.filter { living.contains($0.key) }
         commands = commands.filter { living.contains($0.key) }
+        arguments = arguments.filter { living.contains($0.key) }
         startTimes = [:]
         for process in table { startTimes[process.pid] = process.startedAt }
 

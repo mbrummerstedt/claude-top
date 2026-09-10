@@ -74,7 +74,7 @@ public enum AttributionEngine {
                 ? stats.reduce(UInt64(0)) { $0 + ($1.rssBytes ?? 0) }
                 : nil
 
-            return AttributionGroup(
+            let shell = AttributionGroup(
                 key: key,
                 label: label(for: key, sessions: sessions, machine: machine),
                 tier: entry.tier,
@@ -84,6 +84,21 @@ public enum AttributionEngine {
                 oldestProcessStartedAt: pids.compactMap { processByPID[$0]?.startedAt }.min(),
                 sessionPID: sessionPID(for: key, sessions: sessions),
                 promptPreview: promptPreview(for: key, sessions: sessions))
+
+            // A group of one says everything in its own row; anything larger is worth
+            // taking apart, because "36 processes" and "nine of them are vitest workers"
+            // lead to different actions.
+            guard pids.count > 1 else { return shell }
+            return AttributionGroup(
+                key: shell.key, label: shell.label, tier: shell.tier,
+                cpuPercent: shell.cpuPercent, rssBytes: shell.rssBytes,
+                containerCPUPercent: shell.containerCPUPercent,
+                containerRSSBytes: shell.containerRSSBytes,
+                pids: shell.pids, containerIDs: shell.containerIDs,
+                oldestProcessStartedAt: shell.oldestProcessStartedAt,
+                sessionPID: shell.sessionPID, promptPreview: shell.promptPreview,
+                breakdown: breakdown(of: shell, processes: processes,
+                                     cpuPercents: cpuPercents))
         }
 
         return Snapshot(machine: machine,
@@ -121,7 +136,8 @@ public enum AttributionEngine {
                 containerRSSBytes: group.containerRSSBytes,
                 pids: group.pids, containerIDs: group.containerIDs,
                 oldestProcessStartedAt: group.oldestProcessStartedAt,
-                sessionPID: group.sessionPID, promptPreview: group.promptPreview)
+                sessionPID: group.sessionPID, promptPreview: group.promptPreview,
+                breakdown: group.breakdown)
         }
     }
 

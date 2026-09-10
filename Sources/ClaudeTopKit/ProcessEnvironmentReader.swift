@@ -13,9 +13,11 @@ import Darwin
 public enum ProcessEnvironmentReader {
 
     public static func read(pids: [Int32])
-        -> (environments: [Int32: ProcessEnvironment], commands: [Int32: String]) {
+        -> (environments: [Int32: ProcessEnvironment], commands: [Int32: String],
+            arguments: [Int32: [String]]) {
         var environments: [Int32: ProcessEnvironment] = [:]
         var commands: [Int32: String] = [:]
+        var arguments: [Int32: [String]] = [:]
 
         // One buffer, reused across every process. The kernel's ceiling on this read is
         // a quarter of a megabyte, and allocating that once per process is most of the
@@ -29,6 +31,7 @@ public enum ProcessEnvironmentReader {
 
             if !raw.arguments.isEmpty {
                 commands[pid] = raw.arguments.joined(separator: " ")
+                arguments[pid] = raw.arguments
             }
             let environment = extract(pid: pid, environmentEntries: raw.environment)
             if environment.messagingSocket != nil || environment.pwd != nil
@@ -36,7 +39,7 @@ public enum ProcessEnvironmentReader {
                 environments[pid] = environment
             }
         }
-        return (environments, commands)
+        return (environments, commands, arguments)
     }
 
     /// Pull the four variables out of a raw `KEY=value` list and let the rest go.
