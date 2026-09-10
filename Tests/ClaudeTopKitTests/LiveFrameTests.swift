@@ -34,9 +34,28 @@ struct LiveFrameTests {
     }
 
     private func frame(_ groups: [AttributionGroup], width: Int = 100, height: Int = 40,
-                       status s: LiveViewStatus? = nil, load: Double = 43.1) -> String {
-        Renderer.liveFrame(Snapshot(machine: machine(load: load), groups: groups),
+                       status s: LiveViewStatus? = nil, load: Double = 43.1,
+                       containers: [ContainerGroup] = []) -> String {
+        Renderer.liveFrame(Snapshot(machine: machine(load: load), groups: groups,
+                                    containerGroups: containers),
                            width: width, height: height, status: s ?? status())
+    }
+
+    private func containerGroup(_ project: String, label: String, key: AttributionKey,
+                                count: Int = 3, cpu: Double? = 4, rss: UInt64? = 100_000_000)
+        -> ContainerGroup {
+        ContainerGroup(
+            project: project, key: key, label: label,
+            containers: (0..<count).map {
+                // A real Compose stack carries the working_dir label, which is what makes
+                // a group stoppable at all.
+                ContainerInfo(id: "\(project)-\($0)", name: "\(project)-\($0)",
+                              image: "postgres:17",
+                              labels: ["com.docker.compose.project.working_dir":
+                                        "/Users/USER/git_repositories/r/.claude/worktrees/w-123456"],
+                              cpuPercent: nil, rssBytes: nil)
+            },
+            cpuPercent: cpu, rssBytes: rss)
     }
 
     @Test("No line is wider than the terminal")
@@ -99,6 +118,83 @@ struct LiveFrameTests {
             rssBytes: 1024, pids: [1], containerIDs: [],
             promptPreview: "prune the build cache too")
         #expect(frame([withPrompt]).contains("prune the build cache"))
+    }
+
+    @Test("Docker is broken out by the project that brought the containers up")
+    func dockerByProject() {
+        // A single Docker row is consistently the largest consumer on this machine and
+        // says nothing about which of eleven containers is responsible.
+        let text = frame([], containers: [
+            containerGroup("bpb-replay", label: "tradebot::device-identify",
+                           key: .session(uuid: "a")),
+            containerGroup("feed-stack", label: "feed-service::ui-improvements",
+                           key: .orphan(repo: "feed-service", worktree: "ui-improvements-053b29")),
+        ])
+        #expect(text.contains("bpb-replay"))
+        #expect(text.contains("tradebot::device-identify"))
+        #expect(text.contains("feed-stack"))
+    }
+
+    @Test("Container CPU is labelled as the VM's, not this machine's")
+    func dockerCPUIsQualified() {
+        // Docker reports a share of the virtual machine's CPUs. On this machine the
+        // containers totalled 0.4% while the VM cost 149% on the host, so presenting the
+        // two in one column would invite exactly the wrong conclusion.
+        let text = frame([], containers: [
+            containerGroup("p", label: "r::w", key: .session(uuid: "a")),
+        ])
+        #expect(text.lowercased().contains("vm"))
+    }
+
+    @Test("A stack whose session is gone is marked as one you can stop")
+    func stoppableStacksAreMarked() {
+        // Shutting down a stack a dead worktree left behind is the cheapest resource you
+        // can get back: nobody is using it and nothing else has to change.
+        let text = frame([], containers: [
+            containerGroup("live-stack", label: "r::live", key: .session(uuid: "a"),
+                           rss: 200_000_000),
+            containerGroup("dead-stack", label: "r::dead",
+                           key: .orphan(repo: "r", worktree: "dead-123456"),
+                           count: 2, rss: 300_000_000),
+        ])
+        #expect(text.contains("can be stopped"))
+        #expect(text.contains("286M") || text.contains("300M") || text.contains("2 containers"))
+    }
+
+    @Test("A stack belonging to a live session is never offered")
+    func liveStacksAreNotOffered() {
+        // Stopping the database the session in front of you is talking to is the same
+        // mistake as reaping its processes.
+        let text = frame([], containers: [
+            containerGroup("live-stack", label: "r::live", key: .session(uuid: "a")),
+        ])
+        #expect(!text.contains("can be stopped"))
+    }
+
+    @Test("A testcontainers cluster is never offered, however abandoned it looks")
+    func testcontainersNeverOffered() {
+        let text = frame([], containers: [
+            ContainerGroup(project: "testcontainers 30ec6daa", key: .unattributed,
+                           label: "", containers: [
+                               ContainerInfo(id: "a", name: "strange_borg", image: "pg",
+                                             labels: ["org.testcontainers": "true"],
+                                             cpuPercent: 0, rssBytes: 50_000_000)],
+                           cpuPercent: 0, rssBytes: 50_000_000),
+        ])
+        #expect(!text.contains("can be stopped"))
+    }
+
+    @Test("No containers means no Docker section")
+    func noDockerSection() {
+        #expect(!frame([group(.session(uuid: "a"), "r::w", cpu: 5)]).contains("DOCKER"))
+    }
+
+    @Test("A container group whose stats are unknown shows unknown")
+    func unknownContainerStats() {
+        let text = frame([], containers: [
+            containerGroup("p", label: "r::w", key: .unattributed, cpu: nil, rss: nil),
+        ])
+        #expect(text.contains("?"))
     }
 
     @Test("The header carries load, cores and oversubscription")

@@ -181,6 +181,42 @@ struct RenderTests {
         #expect(Renderer.json(s) == Renderer.json(s))
     }
 
+    @Test("Docker projects reach the JSON with their own figures and a stoppable flag")
+    func jsonDockerProjects() throws {
+        // The field an agent acts on when it wants resources back without touching
+        // anyone's running work.
+        let stack = ContainerGroup(
+            project: "feed-stack",
+            key: .orphan(repo: "feed-service", worktree: "ui-improvements-053b29"),
+            label: "feed-service::ui-improvements",
+            containers: [ContainerInfo(id: "c1", name: "feed-postgres-1", image: "postgres:17",
+                                       labels: ["com.docker.compose.project.working_dir":
+                                                 "/Users/USER/git_repositories/f/.claude/worktrees/w-123456"],
+                                       cpuPercent: 2, rssBytes: 50_000_000)],
+            cpuPercent: 2, rssBytes: 50_000_000)
+
+        let json = Renderer.json(Snapshot(machine: machine(), groups: [],
+                                          containerGroups: [stack]))
+        let parsed = try #require(try JSONSerialization.jsonObject(with: Data(json.utf8))
+                                  as? [String: Any])
+        let projects = try #require(parsed["dockerProjects"] as? [[String: Any]])
+        #expect(projects.first?["project"] as? String == "feed-stack")
+        #expect(projects.first?["stoppable"] as? Bool == true)
+        #expect(projects.first?["vmRssBytes"] as? Int == 50_000_000)
+        #expect((projects.first?["containerNames"] as? [String]) == ["feed-postgres-1"])
+    }
+
+    @Test("The VM figures are named apart from the host figures")
+    func jsonKeepsVMFiguresDistinct() throws {
+        // Docker reports a share of the virtual machine's CPUs. A consumer that added
+        // them to a host percentage would be adding two different denominators.
+        let json = Renderer.json(Snapshot(machine: machine(), groups: [], containerGroups: []))
+        let parsed = try #require(try JSONSerialization.jsonObject(with: Data(json.utf8))
+                                  as? [String: Any])
+        #expect(parsed["dockerProjects"] as? [[String: Any]] != nil)
+        #expect(!json.contains("\"cpuPercent\" : 0,"), "host and VM figures must stay named apart")
+    }
+
     // MARK: - statusline
 
     @Test("The statusline shows machine load and this session's own share")

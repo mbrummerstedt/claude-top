@@ -87,7 +87,9 @@ public enum AttributionEngine {
         }
 
         return Snapshot(machine: machine,
-                        groups: disambiguate(groups).sorted(by: ordered))
+                        groups: disambiguate(groups).sorted(by: ordered),
+                        containerGroups: containerGroups(containers: containers,
+                                                         sessions: sessions))
     }
 
     /// Sessions started from the same directory produce the same label, and several
@@ -350,6 +352,62 @@ public enum AttributionEngine {
         guard container.name.hasPrefix(prefix) else { return nil }
         let id = String(container.name.dropFirst(prefix.count))
         return id.isEmpty ? nil : id
+    }
+
+    /// Containers grouped by the project that brought them up, tied to the session or
+    /// worktree that owns it.
+    ///
+    /// The grouping key is the Compose project rather than the worktree, because two
+    /// stacks in one worktree are two things you start and stop separately. A
+    /// Testcontainers cluster groups by its session id, so a database and the reaper that
+    /// will clean it up read as one unit. Anything else is a group of one, named after
+    /// itself, and stays unattributed.
+    public static func containerGroups(containers: [ContainerInfo],
+                                       sessions: [SessionInfo]) -> [ContainerGroup] {
+        guard !containers.isEmpty else { return [] }
+        let placed = resolveContainers(containers: containers, sessions: sessions)
+
+        var order: [String] = []
+        var members: [String: [ContainerInfo]] = [:]
+        for container in containers {
+            let project = container.composeProject
+                ?? placed[container.id]?.clusterID.map { "testcontainers \($0.prefix(8))" }
+                ?? container.name
+            if members[project] == nil { order.append(project) }
+            members[project, default: []].append(container)
+        }
+
+        let groups = order.map { project -> ContainerGroup in
+            let inGroup = members[project] ?? []
+            // The group's identity comes from whichever member the cascade could place.
+            // A Compose stack agrees across its containers; a Testcontainers cluster is
+            // unattributed either way.
+            let key = inGroup.compactMap { placed[$0.id]?.key }
+                .first { $0 != .unattributed } ?? .unattributed
+
+            // Summed only when Docker answered for every member. A partial sum looks
+            // complete and is wrong, which is worse than saying nothing.
+            let cpu = inGroup.allSatisfy { $0.cpuPercent != nil }
+                ? inGroup.reduce(0.0) { $0 + ($1.cpuPercent ?? 0) } : nil
+            let rss = inGroup.allSatisfy { $0.rssBytes != nil }
+                ? inGroup.reduce(UInt64(0)) { $0 + ($1.rssBytes ?? 0) } : nil
+
+            return ContainerGroup(
+                project: project, key: key,
+                label: label(for: key, sessions: sessions,
+                             machine: MachineInfo(cpuCount: 0, memTotalBytes: 0,
+                                                  loadAverage1: 0, capturedAt: Date(),
+                                                  homeDirectory: "")),
+                containers: inGroup, cpuPercent: cpu, rssBytes: rss)
+        }
+
+        return groups.sorted {
+            if ($0.cpuPercent ?? -1) != ($1.cpuPercent ?? -1) {
+                return ($0.cpuPercent ?? -1) > ($1.cpuPercent ?? -1)
+            }
+            if ($0.rssBytes ?? 0) != ($1.rssBytes ?? 0) { return ($0.rssBytes ?? 0) > ($1.rssBytes ?? 0) }
+            return $0.project < $1.project
+        }
     }
 
     /// What a reap of `target` would select, and why it selected each thing.

@@ -117,6 +117,7 @@ public struct ContainerInfo: Sendable {
     }
 
     public var composeWorkingDir: String? { labels["com.docker.compose.project.working_dir"] }
+    public var composeProject: String? { labels["com.docker.compose.project"] }
     public var testcontainersSessionID: String? { labels["org.testcontainers.session-id"] }
     public var isTestcontainersReaper: Bool { labels["org.testcontainers.ryuk"] == "true" }
 }
@@ -250,9 +251,15 @@ public struct AttributionGroup: Sendable {
 public struct Snapshot: Sendable {
     public let machine: MachineInfo
     public let groups: [AttributionGroup]
+    /// Containers rolled up by the project that brought them up. Separate from `groups`
+    /// because a container is not a process: its figures come from Docker and describe
+    /// the inside of a virtual machine, not this Mac's cores.
+    public let containerGroups: [ContainerGroup]
 
-    public init(machine: MachineInfo, groups: [AttributionGroup]) {
+    public init(machine: MachineInfo, groups: [AttributionGroup],
+                containerGroups: [ContainerGroup] = []) {
         self.machine = machine; self.groups = groups
+        self.containerGroups = containerGroups
     }
 
     public var sessions: [AttributionGroup] {
@@ -456,4 +463,37 @@ public struct Roster: Sendable {
     /// would resolve as orphaned. That is acceptable in a list and unacceptable in a
     /// kill list.
     public var allowsReaping: Bool { source == .live }
+}
+
+/// Containers rolled up into the unit a person reasons about.
+///
+/// Nobody thinks about `bpb-replay-postgres-1`. They think about the stack a worktree
+/// brought up, which is three containers that live and die together, and about whether
+/// the session that started it still exists.
+public struct ContainerGroup: Sendable {
+    /// The Compose project, the Testcontainers session, or a lone container's own name.
+    public let project: String
+    public let key: AttributionKey
+    /// The worktree or session this belongs to, or an honest blank.
+    public let label: String
+    public let containers: [ContainerInfo]
+    /// As Docker reports it, which is a share of the virtual machine's CPUs and not of
+    /// this Mac's. Never added to a host figure. nil when Docker could not answer for
+    /// every container in the group.
+    public let cpuPercent: Double?
+    public let rssBytes: UInt64?
+
+    public init(project: String, key: AttributionKey, label: String,
+                containers: [ContainerInfo], cpuPercent: Double?, rssBytes: UInt64?) {
+        self.project = project; self.key = key; self.label = label
+        self.containers = containers; self.cpuPercent = cpuPercent; self.rssBytes = rssBytes
+    }
+
+    public var isReapable: Bool {
+        // Same rule as everywhere else: a Compose project in a worktree whose session is
+        // gone. Never a Testcontainers cluster, which has its own reaper, and never an
+        // unlabelled container, which nothing can claim.
+        if case .orphan = key { return containers.allSatisfy { $0.composeWorkingDir != nil } }
+        return false
+    }
 }
