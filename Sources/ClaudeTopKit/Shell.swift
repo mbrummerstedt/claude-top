@@ -24,32 +24,51 @@ public enum Shell {
         process.standardOutput = stdout
         process.standardError = stderr
 
+        // Signalled from the termination handler rather than from a thread parked in
+        // waitUntilExit, and the pipes are drained on threads of their own rather than on
+        // the shared dispatch pool. Borrowing pool threads here is what made this hang:
+        // under parallel test execution every concurrent shell-out wanted two of them, a
+        // machine with few cores ran out, and `/bin/echo hello` took thirteen seconds to
+        // report a timeout it never actually had.
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+
         do { try process.run() } catch { return nil }
 
         let collected = Box()
-        let finished = DispatchSemaphore(value: 0)
-        let queue = DispatchQueue(label: "claude-top.shell", attributes: .concurrent)
+        let outputDrained = DispatchSemaphore(value: 0)
 
-        queue.async {
+        let outputReader = Thread {
             collected.set(stdout.fileHandleForReading.readDataToEndOfFile())
-            process.waitUntilExit()
-            finished.signal()
+            outputDrained.signal()
         }
-        // Drained but discarded. An undrained stderr pipe fills at 64 KB and blocks the
+        outputReader.stackSize = 512 * 1024
+        outputReader.start()
+
+        // Drained and discarded. An undrained stderr pipe fills at 64 KB and blocks the
         // child forever, which would turn a diagnostic into the hang it was meant to warn
         // about.
-        queue.async { _ = stderr.fileHandleForReading.readDataToEndOfFile() }
+        let errorReader = Thread { _ = stderr.fileHandleForReading.readDataToEndOfFile() }
+        errorReader.stackSize = 512 * 1024
+        errorReader.start()
 
-        if finished.wait(timeout: .now() + timeout) == .timedOut {
+        if exited.wait(timeout: .now() + timeout) == .timedOut {
             process.terminate()
-            if finished.wait(timeout: .now() + graceAfterTerminate) == .timedOut {
+            if exited.wait(timeout: .now() + graceAfterTerminate) == .timedOut {
                 kill(process.processIdentifier, SIGKILL)
-                _ = finished.wait(timeout: .now() + graceAfterTerminate)
+                _ = exited.wait(timeout: .now() + graceAfterTerminate)
             }
+            _ = outputDrained.wait(timeout: .now() + graceAfterTerminate)
             return nil
         }
 
-        guard process.terminationStatus == 0 else { return nil }
+        // The child has exited, so its end of the pipe is closed and the reader reaches
+        // EOF. Waiting on that is what makes the output complete rather than whatever had
+        // arrived by the time the process died.
+        guard outputDrained.wait(timeout: .now() + graceAfterTerminate) == .success,
+              process.terminationStatus == 0
+        else { return nil }
+
         return String(data: collected.get(), encoding: .utf8)
     }
 

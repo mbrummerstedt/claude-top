@@ -31,6 +31,27 @@ struct CollectorTests {
         #expect(Shell.run("/usr/bin/false", [], timeout: 5) == nil)
     }
 
+    @Test("A shell-out answers even when the dispatch pool is fully occupied")
+    func shellUnderPoolSaturation() {
+        // The failure this guards against: `Shell.run` used to take two threads from the
+        // shared dispatch pool per call. Running the suite in parallel on a machine with
+        // few cores exhausted the pool, and `/bin/echo hello` sat for thirteen seconds
+        // and then reported a timeout that had not happened. Nothing here may depend on
+        // a pool thread being free.
+        let hogs = 64
+        let release = DispatchSemaphore(value: 0)
+        for _ in 0..<hogs {
+            DispatchQueue.global().async { release.wait() }
+        }
+        defer { for _ in 0..<hogs { release.signal() } }
+        Thread.sleep(forTimeInterval: 0.2)   // let them take the threads
+
+        let started = Date()
+        let output = Shell.run("/bin/echo", ["hello"], timeout: 5)
+        #expect(output?.trimmingCharacters(in: .whitespacesAndNewlines) == "hello")
+        #expect(Date().timeIntervalSince(started) < 3, "the shell-out waited on the pool")
+    }
+
     @Test("A binary that is not installed is not an error")
     func shellMissingBinary() {
         // `docker` and `claude` are both optional. Their absence means the corresponding
