@@ -40,9 +40,10 @@ struct CollectorTests {
 
     // MARK: - session roster
 
-    @Test("The roster parses and drops the prompt text")
+    @Test("The roster parses, prompt included, for the terminal to show")
     func rosterParse() throws {
-        // `name` is the user's opening prompt. It must not be retained, logged, or stored.
+        // `name` is the user's opening prompt. It is carried far enough to be printed and
+        // no further; `PromptBoundaryTests` is what holds that line.
         let json = """
         [{"pid": 1527, "cwd": "/Users/USER/git_repositories/reader-app/.claude/worktrees/terms-page-63c477",
           "sessionId": "local_abc-123", "startedAt": 1757500000000,
@@ -54,8 +55,8 @@ struct CollectorTests {
         #expect(sessions.first?.sessionID == "local_abc-123")
         #expect(sessions.first?.startedAt.timeIntervalSince1970 == 1_757_500_000)
 
-        let mirror = String(describing: sessions)
-        #expect(!mirror.contains("production"), "prompt text survived into the roster")
+        #expect(sessions.first?.promptPreview
+                == "fix the thing that keeps breaking in production")
     }
 
     @Test("Malformed roster JSON yields an empty roster, not a crash")
@@ -78,6 +79,61 @@ struct CollectorTests {
             entrypoint: nil, pwd: "/Users/USER/git_repositories/a/.claude/worktrees/b-123456")]
         let r = AttributionEngine.resolveProcesses(processes: procs, environments: envs, sessions: [])
         #expect(r[500]?.key == .orphan(repo: "a", worktree: "b-123456"))
+    }
+
+    @Test("An install that rejects the flag is skipped for one that answers")
+    func rosterSkipsAStaleInstall() throws {
+        // A real failure found by running this on a machine that had two claude installs:
+        // an older Homebrew one first on PATH answering "unknown option --json", and a
+        // newer one after it. Treating the first failure as "no sessions are running"
+        // filed every live session as an orphan, which is exactly the mistake that makes
+        // --reap dangerous rather than merely wrong.
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("claude-top-bins-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        func write(_ name: String, _ script: String) throws -> String {
+            let path = directory.appendingPathComponent(name)
+            try ("#!/bin/sh\n" + script).write(to: path, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755],
+                                                  ofItemAtPath: path.path)
+            return path.path
+        }
+
+        let stale = try write("claude-stale", "echo \"error: unknown option '--json'\" >&2; exit 1")
+        let current = try write("claude-current", """
+            echo '[{"pid": 1527, "cwd": "/Users/USER/r/.claude/worktrees/w-123456", \
+            "sessionId": "local_abc", "startedAt": 1757500000000, "name": "secret prompt"}]'
+            """)
+
+        let sessions = SessionRoster.live(timeout: 5, candidates: [stale, current])
+        #expect(sessions.count == 1, "the working install was never reached")
+        #expect(sessions.first?.sessionID == "local_abc")
+    }
+
+    @Test("An install answering with an empty list is believed")
+    func rosterAcceptsAnEmptyAnswer() throws {
+        // No sessions running is a real answer and must not send the search onward to a
+        // stale install that would answer differently.
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("claude-top-bins-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let path = directory.appendingPathComponent("claude-empty")
+        try "#!/bin/sh\necho '[]'".write(to: path, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path.path)
+
+        #expect(SessionRoster.live(timeout: 5, candidates: [path.path]).isEmpty)
+    }
+
+    @Test("The same install reached by several paths is only tried once")
+    func locateDeduplicatesSymlinks() {
+        // /opt/homebrew/bin/claude is a symlink into lib/node_modules. Trying it once per
+        // path that reaches it turns a lookup into several process launches.
+        let candidates = Shell.locateAll("sh")
+        #expect(Set(candidates).count == candidates.count)
     }
 
     // MARK: - containers

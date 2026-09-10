@@ -78,17 +78,25 @@ public struct ProcessEnvironment: Sendable {
 }
 
 /// A live session, from `claude agents --json`.
-///
-/// The `name` field of that JSON is the user's opening prompt. It is deliberately absent
-/// here: it must not be persisted, logged, or written into a fixture.
 public struct SessionInfo: Sendable {
     public let pid: Int32
     public let cwd: String
     public let sessionID: String
     public let startedAt: Date
+    /// The opening prompt, which is the only thing that tells two sessions apart when
+    /// both were started from a home directory and neither has a worktree to be named
+    /// after.
+    ///
+    /// Display only, and only in the terminal table. It is never written to the database,
+    /// never in `--json`, never in the reap log, and never in a fixture: it is the user's
+    /// own words, and a file on disk outlives the terminal it was printed to.
+    /// `PromptBoundaryTests` is what keeps that true.
+    public let promptPreview: String?
 
-    public init(pid: Int32, cwd: String, sessionID: String, startedAt: Date) {
-        self.pid = pid; self.cwd = cwd; self.sessionID = sessionID; self.startedAt = startedAt
+    public init(pid: Int32, cwd: String, sessionID: String, startedAt: Date,
+                promptPreview: String? = nil) {
+        self.pid = pid; self.cwd = cwd; self.sessionID = sessionID
+        self.startedAt = startedAt; self.promptPreview = promptPreview
     }
 }
 
@@ -116,6 +124,9 @@ public struct ContainerInfo: Sendable {
 public struct MachineInfo: Sendable {
     public let cpuCount: Int
     public let memTotalBytes: UInt64
+    /// Active, wired and compressed. Memory was not the binding constraint on the
+    /// reference machine (10 of 16 GB at load 55) but it is what people look at first.
+    public let memUsedBytes: UInt64
     public let loadAverage1: Double
     public let capturedAt: Date
     /// Passed in rather than read, so attribution stays a pure function and a fixture
@@ -129,10 +140,11 @@ public struct MachineInfo: Sendable {
     /// implying the breakdown is complete.
     public let processCount: Int
 
-    public init(cpuCount: Int, memTotalBytes: UInt64, loadAverage1: Double,
-                capturedAt: Date, homeDirectory: String = NSHomeDirectory(),
-                processCount: Int = 0) {
+    public init(cpuCount: Int, memTotalBytes: UInt64, memUsedBytes: UInt64 = 0,
+                loadAverage1: Double, capturedAt: Date,
+                homeDirectory: String = NSHomeDirectory(), processCount: Int = 0) {
         self.cpuCount = cpuCount; self.memTotalBytes = memTotalBytes
+        self.memUsedBytes = memUsedBytes
         self.loadAverage1 = loadAverage1; self.capturedAt = capturedAt
         self.homeDirectory = homeDirectory; self.processCount = processCount
     }
@@ -193,16 +205,42 @@ public struct AttributionGroup: Sendable {
     public let containerRSSBytes: UInt64?
     public let pids: [Int32]
     public let containerIDs: [String]
+    /// The live session's own process id, for `.session` keys. It is what lets a process
+    /// recognise its own row: a session knows its pid from the socket path it was handed,
+    /// and that anchor is the same one the whole cascade rests on.
+    public let sessionPID: Int32?
+    /// The session's opening prompt, for the terminal table only. Kept out of `label`
+    /// deliberately, because `label` is stored and this must not be.
+    public let promptPreview: String?
+    /// When the longest-running member started. For an orphan this is how long the
+    /// leftovers have been running unattended, which is the fact that decides whether
+    /// they are worth stopping: a watcher idle since yesterday is not coming back.
+    public let oldestProcessStartedAt: Date?
 
     public init(key: AttributionKey, label: String, tier: AttributionTier,
                 cpuPercent: Double?, rssBytes: UInt64,
                 containerCPUPercent: Double? = nil, containerRSSBytes: UInt64? = nil,
-                pids: [Int32], containerIDs: [String]) {
+                pids: [Int32], containerIDs: [String],
+                oldestProcessStartedAt: Date? = nil, sessionPID: Int32? = nil,
+                promptPreview: String? = nil) {
         self.key = key; self.label = label; self.tier = tier
         self.cpuPercent = cpuPercent; self.rssBytes = rssBytes
         self.containerCPUPercent = containerCPUPercent
         self.containerRSSBytes = containerRSSBytes
         self.pids = pids; self.containerIDs = containerIDs
+        self.oldestProcessStartedAt = oldestProcessStartedAt
+        self.sessionPID = sessionPID
+        self.promptPreview = promptPreview
+    }
+
+    /// Only sessions and their leftovers can be stopped by this tool. A system family or
+    /// an unattributed container is reported so the totals are honest and for no other
+    /// reason.
+    public var isReapable: Bool {
+        switch key {
+        case .session, .orphan: return true
+        case .system, .unattributed: return false
+        }
     }
 }
 
@@ -293,4 +331,82 @@ public struct ReapPlan: Sendable, Equatable {
     }
 
     public var isEmpty: Bool { processes.isEmpty && containers.isEmpty }
+}
+
+extension AttributionKey {
+    /// Stable string form, used as the SQLite primary key and as the `key` field in
+    /// `--json`. Both are contracts that outlive a release, so the shape is fixed here
+    /// rather than left to whatever a formatter happens to produce.
+    public var storageKey: String {
+        switch self {
+        case .session(let uuid): return "session:\(uuid)"
+        case .orphan(let repo, let worktree): return "orphan:\(repo)::\(worktree)"
+        case .system(let family): return "system:\(family.rawValue)"
+        case .unattributed: return "unattributed"
+        }
+    }
+
+    /// The block this key belongs to, which is what the CLI groups by and what a consumer
+    /// of `--json` filters on.
+    public var kind: String {
+        switch self {
+        case .session: return "session"
+        case .orphan: return "orphan"
+        case .system: return "system"
+        case .unattributed: return "unattributed"
+        }
+    }
+
+    public init?(storageKey: String) {
+        if storageKey == "unattributed" { self = .unattributed; return }
+        guard let colon = storageKey.firstIndex(of: ":") else { return nil }
+        let value = String(storageKey[storageKey.index(after: colon)...])
+        switch storageKey[storageKey.startIndex..<colon] {
+        case "session":
+            self = .session(uuid: value)
+        case "orphan":
+            guard let separator = value.range(of: "::") else { return nil }
+            self = .orphan(repo: String(value[value.startIndex..<separator.lowerBound]),
+                           worktree: String(value[separator.upperBound...]))
+        case "system":
+            guard let family = SystemFamily(rawValue: value) else { return nil }
+            self = .system(family: family)
+        default:
+            return nil
+        }
+    }
+}
+
+/// A tick read back out of the store.
+public struct StoredSample: Sendable {
+    public let timestamp: Date
+    public let loadAverage1: Double
+    public let cpuCount: Int
+    public let memUsedBytes: UInt64
+    public let memTotalBytes: UInt64
+    public let groups: [StoredGroup]
+
+    public init(timestamp: Date, loadAverage1: Double, cpuCount: Int,
+                memUsedBytes: UInt64, memTotalBytes: UInt64, groups: [StoredGroup]) {
+        self.timestamp = timestamp; self.loadAverage1 = loadAverage1
+        self.cpuCount = cpuCount; self.memUsedBytes = memUsedBytes
+        self.memTotalBytes = memTotalBytes; self.groups = groups
+    }
+}
+
+public struct StoredGroup: Sendable {
+    public let key: AttributionKey
+    public let label: String
+    public let cpuPercent: Double?
+    public let rssBytes: UInt64
+    public let processCount: Int
+    public let containerCount: Int
+    public let sessionPID: Int32?
+
+    public init(key: AttributionKey, label: String, cpuPercent: Double?, rssBytes: UInt64,
+                processCount: Int, containerCount: Int, sessionPID: Int32? = nil) {
+        self.key = key; self.label = label; self.cpuPercent = cpuPercent
+        self.rssBytes = rssBytes; self.processCount = processCount
+        self.containerCount = containerCount; self.sessionPID = sessionPID
+    }
 }

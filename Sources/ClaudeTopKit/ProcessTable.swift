@@ -74,10 +74,32 @@ public enum MachineProbe {
         return MachineInfo(
             cpuCount: sysctlInt("hw.logicalcpu") ?? ProcessInfo.processInfo.activeProcessorCount,
             memTotalBytes: UInt64(sysctlInt("hw.memsize") ?? 0),
+            memUsedBytes: usedMemory(),
             loadAverage1: load,
             capturedAt: capturedAt,
             homeDirectory: NSHomeDirectory(),
             processCount: processCount)
+    }
+
+    /// Active, wired and compressed pages. Not free memory: macOS keeps very little of
+    /// that by design, and reporting it would make every machine look full.
+    private static func usedMemory() -> UInt64 {
+        var stats = vm_statistics64_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.size
+                                           / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &stats) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return 0 }
+
+        var pageSize: vm_size_t = 0
+        guard host_page_size(mach_host_self(), &pageSize) == KERN_SUCCESS else { return 0 }
+
+        let pages = UInt64(stats.active_count) + UInt64(stats.wire_count)
+            + UInt64(stats.compressor_page_count)
+        return pages * UInt64(pageSize)
     }
 
     private static func sysctlInt(_ name: String) -> Int? {

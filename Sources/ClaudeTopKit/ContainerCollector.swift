@@ -8,15 +8,23 @@ import Foundation
 public enum ContainerCollector {
 
     public static func current(timeout: TimeInterval = 3) -> [ContainerInfo] {
-        guard let docker = Shell.locate("docker", extraDirectories: [
+        let binaries = Shell.locateAll("docker", extraDirectories: [
             (NSHomeDirectory() as NSString).appendingPathComponent(".docker/bin"),
             "/Applications/Docker.app/Contents/Resources/bin",
-        ]) else { return [] }
+        ])
 
-        guard let listing = Shell.run(docker, ["ps", "--format", "{{json .}}"], timeout: timeout)
-        else { return [] }
-        let containers = parseContainers(psJSONLines: listing)
-        guard !containers.isEmpty else { return [] }
+        // Same reason as the session roster: more than one docker can be installed, and
+        // one of them may not be able to reach a daemon.
+        var docker: String?
+        var containers: [ContainerInfo] = []
+        for binary in binaries {
+            guard let listing = Shell.run(binary, ["ps", "--format", "{{json .}}"],
+                                          timeout: timeout) else { continue }
+            docker = binary
+            containers = parseContainers(psJSONLines: listing)
+            break
+        }
+        guard let docker, !containers.isEmpty else { return [] }
 
         let stats = Shell.run(docker, ["stats", "--no-stream", "--format", "{{json .}}"],
                               timeout: timeout)

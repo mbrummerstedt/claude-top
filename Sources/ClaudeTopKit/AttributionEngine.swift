@@ -80,10 +80,58 @@ public enum AttributionEngine {
                 tier: entry.tier,
                 cpuPercent: cpu, rssBytes: rss,
                 containerCPUPercent: containerCPU, containerRSSBytes: containerRSS,
-                pids: pids, containerIDs: containerIDs)
+                pids: pids, containerIDs: containerIDs,
+                oldestProcessStartedAt: pids.compactMap { processByPID[$0]?.startedAt }.min(),
+                sessionPID: sessionPID(for: key, sessions: sessions),
+                promptPreview: promptPreview(for: key, sessions: sessions))
         }
 
-        return Snapshot(machine: machine, groups: groups.sorted(by: ordered))
+        return Snapshot(machine: machine,
+                        groups: disambiguate(groups).sorted(by: ordered))
+    }
+
+    /// Sessions started from the same directory produce the same label, and several
+    /// running from home all read as `~`. A row you cannot tell apart from three others
+    /// is not something you can act on, so colliding labels get a short discriminator.
+    private static func disambiguate(_ groups: [AttributionGroup]) -> [AttributionGroup] {
+        // Counted on the label together with the prompt, because that pair is what the
+        // terminal actually shows. Two home-directory sessions opened with different
+        // sentences already read as different rows, and adding a hash to both would be
+        // noise on top of an answer.
+        func identity(_ group: AttributionGroup) -> String {
+            group.label + (group.promptPreview ?? "")
+        }
+        let counts = groups.reduce(into: [String: Int]()) { $0[identity($1), default: 0] += 1 }
+        guard counts.values.contains(where: { $0 > 1 }) else { return groups }
+
+        return groups.map { group in
+            guard counts[identity(group), default: 0] > 1 else { return group }
+            let discriminator: String
+            switch group.key {
+            case .session(let uuid): discriminator = String(uuid.prefix(6))
+            case .orphan(_, let worktree): discriminator = String(worktree.suffix(6))
+            case .system, .unattributed: return group
+            }
+            return AttributionGroup(
+                key: group.key, label: "\(group.label) (\(discriminator))", tier: group.tier,
+                cpuPercent: group.cpuPercent, rssBytes: group.rssBytes,
+                containerCPUPercent: group.containerCPUPercent,
+                containerRSSBytes: group.containerRSSBytes,
+                pids: group.pids, containerIDs: group.containerIDs,
+                oldestProcessStartedAt: group.oldestProcessStartedAt,
+                sessionPID: group.sessionPID, promptPreview: group.promptPreview)
+        }
+    }
+
+    private static func sessionPID(for key: AttributionKey, sessions: [SessionInfo]) -> Int32? {
+        guard case .session(let uuid) = key else { return nil }
+        return sessions.first { $0.sessionID == uuid }?.pid
+    }
+
+    private static func promptPreview(for key: AttributionKey,
+                                      sessions: [SessionInfo]) -> String? {
+        guard case .session(let uuid) = key else { return nil }
+        return sessions.first { $0.sessionID == uuid }?.promptPreview
     }
 
     /// Live sessions, then the leftovers of sessions that are gone, then everything else,

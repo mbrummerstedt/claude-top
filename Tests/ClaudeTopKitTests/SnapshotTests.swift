@@ -154,6 +154,27 @@ struct SnapshotTests {
         #expect(s.sessions.first?.label == "~")
     }
 
+    @Test("Sessions that would share a label are told apart")
+    func collidingLabels() {
+        // Four of the fourteen sessions on the reference machine ran from home, and all
+        // four rendered as `~`. Four identical rows is four rows nobody can act on.
+        let s = snapshot(processes: [proc(500), proc(600)],
+                         environments: [env(500, session: 100), env(600, session: 200)],
+                         sessions: [session(100, "/Users/USER", uuid: "aaaaaa-1"),
+                                    session(200, "/Users/USER", uuid: "bbbbbb-2")],
+                         cpu: [500: 1, 600: 2])
+        let labels = s.sessions.map(\.label)
+        #expect(Set(labels).count == 2, "two sessions still share one label")
+        #expect(labels.allSatisfy { $0.hasPrefix("~ (") })
+    }
+
+    @Test("A label that is already unique is left alone")
+    func uniqueLabelsUntouched() {
+        let s = snapshot(processes: [proc(500)], environments: [env(500, session: 100)],
+                         sessions: [session(100, worktreeA, uuid: "uuid-a")], cpu: [500: 1])
+        #expect(s.sessions.first?.label == "reader-app::terms-page")
+    }
+
     // MARK: - against the reference capture
 
     private func fixtureSnapshot() throws -> Snapshot {

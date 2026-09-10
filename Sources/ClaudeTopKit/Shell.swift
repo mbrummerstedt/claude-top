@@ -56,20 +56,43 @@ public enum Shell {
     /// Matches the escalation used when reaping: signal, wait, and only then insist.
     private static let graceAfterTerminate: TimeInterval = 2
 
-    /// First match in the directories a GUI or launchd process actually sees. `PATH` is
-    /// not consulted first because the sampler runs under launchd, which does not inherit
-    /// the interactive shell's `PATH`, and this machine has pyenv shims early in it.
-    public static func locate(_ name: String, extraDirectories: [String] = []) -> String? {
-        var directories = extraDirectories
-        directories += ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+    /// Every place a tool might be installed, in the order worth trying.
+    ///
+    /// All of them, not the first one that exists, because more than one can be installed
+    /// at once and the first is not necessarily the one that works. A Mac can carry both
+    /// a Homebrew `claude` and a newer `/usr/local/bin` one, and the older of the two
+    /// answers `agents --json` with "unknown option" rather than with sessions. A caller
+    /// works down this list until something actually answers.
+    ///
+    /// `PATH` comes first because it is what the person's own shell resolves, then the
+    /// fixed directories, which is what a launchd job sees: launchd inherits no
+    /// interactive `PATH` at all.
+    public static func locateAll(_ name: String, extraDirectories: [String] = []) -> [String] {
+        var directories: [String] = []
         if let path = ProcessInfo.processInfo.environment["PATH"] {
             directories += path.split(separator: ":").map(String.init)
         }
+        directories += extraDirectories
+        directories += ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"]
+
+        var found: [String] = []
+        var seen: Set<String> = []
         for directory in directories {
             let candidate = (directory as NSString).appendingPathComponent(name)
-            if FileManager.default.isExecutableFile(atPath: candidate) { return candidate }
+            guard FileManager.default.isExecutableFile(atPath: candidate) else { continue }
+            // Deduplicated by where the symlink actually points, so the same install
+            // reached through three different paths is only tried once.
+            let resolved = (try? FileManager.default.destinationOfSymbolicLink(atPath: candidate))
+                .map { $0.hasPrefix("/") ? $0 : (directory as NSString).appendingPathComponent($0) }
+                ?? candidate
+            let identity = (resolved as NSString).standardizingPath
+            if seen.insert(identity).inserted { found.append(candidate) }
         }
-        return nil
+        return found
+    }
+
+    public static func locate(_ name: String, extraDirectories: [String] = []) -> String? {
+        locateAll(name, extraDirectories: extraDirectories).first
     }
 
     private final class Box: @unchecked Sendable {
