@@ -128,9 +128,10 @@ struct CollectorTests {
             "sessionId": "local_abc", "startedAt": 1757500000000, "name": "secret prompt"}]'
             """)
 
-        let sessions = SessionRoster.live(timeout: 5, candidates: [stale, current])
-        #expect(sessions.count == 1, "the working install was never reached")
-        #expect(sessions.first?.sessionID == "local_abc")
+        let roster = SessionRoster.live(timeout: 5, candidates: [stale, current], cache: nil)
+        #expect(roster.sessions.count == 1, "the working install was never reached")
+        #expect(roster.sessions.first?.sessionID == "local_abc")
+        #expect(roster.source == .live)
     }
 
     @Test("An install answering with an empty list is believed")
@@ -146,7 +147,10 @@ struct CollectorTests {
         try "#!/bin/sh\necho '[]'".write(to: path, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path.path)
 
-        #expect(SessionRoster.live(timeout: 5, candidates: [path.path]).isEmpty)
+        let roster = SessionRoster.live(timeout: 5, candidates: [path.path], cache: nil)
+        #expect(roster.sessions.isEmpty)
+        // Genuinely empty, and it must stay distinguishable from unreadable.
+        #expect(roster.source == .live)
     }
 
     @Test("The same install reached by several paths is only tried once")
