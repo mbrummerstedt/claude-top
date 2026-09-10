@@ -25,7 +25,10 @@ public enum Renderer {
 
         if !snapshot.sessions.isEmpty {
             lines.append(columnHeading("CLAUDE SESSIONS", width: width))
-            lines += snapshot.sessions.map { row($0, asOf: snapshot.machine.capturedAt, width: width) }
+            for group in snapshot.sessions {
+                lines.append(row(group, asOf: snapshot.machine.capturedAt, width: width))
+                lines += detailRows(for: group, limit: 3).map { kindRow($0, width: width) }
+            }
             lines.append("")
         }
 
@@ -207,6 +210,19 @@ public enum Renderer {
                 "pids": group.pids,
                 "containerIds": group.containerIDs,
             ]
+            // What the group is made of. An agent deciding what to cap or stop needs the
+            // kinds and their pids, not just a total.
+            if !group.breakdown.isEmpty {
+                row["breakdown"] = group.breakdown.map { kind -> [String: Any] in
+                    [
+                        "name": kind.name,
+                        "count": kind.count,
+                        "cpuPercent": kind.cpuPercent ?? NSNull(),
+                        "rssBytes": kind.rssBytes,
+                        "pids": kind.pids,
+                    ]
+                }
+            }
             if let started = group.oldestProcessStartedAt {
                 row["oldestProcessStartedAt"] = iso8601.string(from: started)
                 row["ageSeconds"] = Int(snapshot.machine.capturedAt.timeIntervalSince(started))
@@ -315,9 +331,9 @@ extension Renderer {
         let overhead = 2
         func cost(_ rows: Int) -> Int { rows == 0 ? 0 : rows + overhead }
 
-        var orphanRows = min(orphans, 6)
+        var orphanRows = min(orphans, 8)
         var dockerRows = min(docker, 5)
-        var elseRows = min(everythingElse, 5)
+        var elseRows = min(everythingElse, 6)
         var sessionRows = min(sessions, max(0, available - cost(orphanRows) - cost(dockerRows)
                                             - cost(elseRows) - (sessions > 0 ? overhead : 0)))
 
@@ -368,11 +384,16 @@ extension Renderer {
         let orphans = snapshot.orphans
         let rosterIsKnown = status.rosterSource != .unavailable
         let footerRows = 2
+        // Lines, not groups. A heavy session brings sub-rows with it, and allocating by
+        // group count left no budget for them, so they were silently never drawn.
+        func lineCost(_ groups: [AttributionGroup]) -> Int {
+            groups.reduce(0) { $0 + 1 + detailRows(for: $1, limit: 2).count }
+        }
         let allocation = allocateRows(available: max(0, height - lines.count - footerRows),
-                                      sessions: snapshot.sessions.count,
-                                      orphans: orphans.count,
+                                      sessions: lineCost(snapshot.sessions),
+                                      orphans: lineCost(orphans),
                                       docker: snapshot.containerGroups.count,
-                                      everythingElse: snapshot.everythingElse.count)
+                                      everythingElse: lineCost(snapshot.everythingElse))
 
         func section(_ title: String, _ groups: [AttributionGroup], rows: Int,
                      summary: String? = nil, showAge: Bool = false) {
@@ -381,13 +402,27 @@ extension Renderer {
 
             // One row gives way to the count when there is more than fits, so the number
             // is never itself the thing that got cut.
-            let shown = groups.count > rows ? max(1, rows - 1) : rows
-            for group in groups.prefix(shown) {
+            let footer = groups.count > rows ? 1 : 0
+            var used = 0
+            var rendered = 0
+
+            for group in groups {
+                guard used + footer < rows else { break }
                 lines.append(liveRow(group, width: width, showAge: showAge,
                                      asOf: machine.capturedAt))
+                used += 1
+                rendered += 1
+
+                // What the heavy ones are made of. Two lines at most: the point is to
+                // name the thing worth stopping, not to list every process.
+                for kind in detailRows(for: group, limit: 2) {
+                    guard used + footer < rows else { break }
+                    lines.append(kindRow(kind, width: width))
+                    used += 1
+                }
             }
-            if groups.count > shown {
-                lines.append(clip("  and \(groups.count - shown) more", width))
+            if groups.count > rendered {
+                lines.append(clip("  and \(groups.count - rendered) more", width))
             }
             lines.append("")
         }
@@ -501,6 +536,26 @@ extension Renderer {
         while lines.count < height - 1 { lines.append("") }
         lines.append(clip("q quit", width))
         return lines.prefix(height).joined(separator: "\n")
+    }
+
+    /// The kinds worth naming under a group's row.
+    ///
+    /// Only for groups heavy enough to be worth acting on: half a core is the same
+    /// threshold the store uses to decide a group is worth keeping detail for. A group
+    /// running one of everything gets nothing, because the row already said that.
+    static func detailRows(for group: AttributionGroup, limit: Int) -> [ProcessKind] {
+        guard (group.cpuPercent ?? 0) >= 50,
+              group.breakdown.contains(where: { $0.count > 1 }) || group.breakdown.count > 1
+        else { return [] }
+        return Array(group.breakdown.prefix(limit))
+    }
+
+    private static func kindRow(_ kind: ProcessKind, width: Int) -> String {
+        let cpu = kind.cpuPercent.map { "\(Int($0.rounded()))%" } ?? "?"
+        let right = self.right(cpu, 6) + self.right(formatBytes(kind.rssBytes), 7) + "     "
+        let room = max(4, width - right.count - 2)
+        let name = kind.count > 1 ? "\(kind.count)x \(kind.name)" : kind.name
+        return pad("    └ " + truncate(name, to: room - 6), to: room) + right
     }
 
     private static func liveRow(_ group: AttributionGroup, width: Int, showAge: Bool,

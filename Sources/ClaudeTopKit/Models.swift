@@ -43,11 +43,20 @@ public struct ProcessSample: Sendable {
     public let cpuTime: TimeInterval
     public let startedAt: Date
     public let command: String
+    /// argv as the kernel handed it over, before it was joined for display.
+    ///
+    /// Kept because joining loses the only thing that separates one argument from the
+    /// next: an executable path containing a space, of which a Mac has many, splits into
+    /// nonsense when the joined string is taken apart again. Empty when argv could not be
+    /// read, and callers fall back to splitting `command`.
+    public let arguments: [String]
 
     public init(pid: Int32, ppid: Int32, rssBytes: UInt64,
-                cpuTime: TimeInterval, startedAt: Date, command: String) {
+                cpuTime: TimeInterval, startedAt: Date, command: String,
+                arguments: [String] = []) {
         self.pid = pid; self.ppid = ppid; self.rssBytes = rssBytes
         self.cpuTime = cpuTime; self.startedAt = startedAt; self.command = command
+        self.arguments = arguments
     }
 }
 
@@ -213,6 +222,9 @@ public struct AttributionGroup: Sendable {
     /// The session's opening prompt, for the terminal table only. Kept out of `label`
     /// deliberately, because `label` is stored and this must not be.
     public let promptPreview: String?
+    /// What the group is made of, heaviest kind first. Empty for a group of one, where
+    /// the row already says everything the breakdown would.
+    public let breakdown: [ProcessKind]
     /// When the longest-running member started. For an orphan this is how long the
     /// leftovers have been running unattended, which is the fact that decides whether
     /// they are worth stopping: a watcher idle since yesterday is not coming back.
@@ -223,7 +235,7 @@ public struct AttributionGroup: Sendable {
                 containerCPUPercent: Double? = nil, containerRSSBytes: UInt64? = nil,
                 pids: [Int32], containerIDs: [String],
                 oldestProcessStartedAt: Date? = nil, sessionPID: Int32? = nil,
-                promptPreview: String? = nil) {
+                promptPreview: String? = nil, breakdown: [ProcessKind] = []) {
         self.key = key; self.label = label; self.tier = tier
         self.cpuPercent = cpuPercent; self.rssBytes = rssBytes
         self.containerCPUPercent = containerCPUPercent
@@ -232,6 +244,7 @@ public struct AttributionGroup: Sendable {
         self.oldestProcessStartedAt = oldestProcessStartedAt
         self.sessionPID = sessionPID
         self.promptPreview = promptPreview
+        self.breakdown = breakdown
     }
 
     /// Only sessions and their leftovers can be stopped by this tool. A system family or

@@ -18,26 +18,30 @@ struct IncrementalCollectorTests {
         var table: [ProcessSample] = []
         private(set) var environmentReads: [[Int32]] = []
 
-        func readTable(_ commands: [Int32: String]) -> [ProcessSample] {
+        func readTable(_ commands: [Int32: String],
+                       _ arguments: [Int32: [String]]) -> [ProcessSample] {
             table.map {
                 ProcessSample(pid: $0.pid, ppid: $0.ppid, rssBytes: $0.rssBytes,
                               cpuTime: $0.cpuTime, startedAt: $0.startedAt,
-                              command: commands[$0.pid] ?? $0.command)
+                              command: commands[$0.pid] ?? $0.command,
+                              arguments: arguments[$0.pid] ?? [])
             }
         }
 
         func readEnvironments(_ pids: [Int32])
-            -> ([Int32: ProcessEnvironment], [Int32: String]) {
+            -> ([Int32: ProcessEnvironment], [Int32: String], [Int32: [String]]) {
             environmentReads.append(pids.sorted())
             var environments: [Int32: ProcessEnvironment] = [:]
             var commands: [Int32: String] = [:]
+            var arguments: [Int32: [String]] = [:]
             for pid in pids {
                 environments[pid] = ProcessEnvironment(
                     pid: pid, messagingSocket: "/tmp/cc-socks/\(pid).sock",
                     hostSessionID: nil, entrypoint: nil, pwd: "/tmp")
                 commands[pid] = "argv-for-\(pid)"
+                arguments[pid] = ["argv-for-\(pid)"]
             }
-            return (environments, commands)
+            return (environments, commands, arguments)
         }
     }
 

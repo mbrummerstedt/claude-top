@@ -35,9 +35,10 @@ struct LiveMachineTests {
         // If this fails, KERN_PROCARGS2 is not returning what the parser expects and every
         // tier-1 attribution on the machine is silently empty.
         let me = getpid()
-        let (environments, commands) = ProcessEnvironmentReader.read(pids: [me])
+        let (environments, commands, arguments) = ProcessEnvironmentReader.read(pids: [me])
         #expect(commands[me]?.isEmpty == false, "own argv came back empty")
         #expect(environments[me]?.pwd != nil, "own PWD came back empty")
+        #expect(arguments[me]?.isEmpty == false, "own argv array came back empty")
     }
 
     @Test("Cumulative CPU time matches what the kernel says this process has used")
