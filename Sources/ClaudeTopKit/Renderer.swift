@@ -42,6 +42,41 @@ public enum Renderer {
             lines.append("")
         }
 
+        if !snapshot.containerGroups.isEmpty {
+            let containers = snapshot.containerGroups.reduce(0) { $0 + $1.containers.count }
+            lines.append("DOCKER (\(containers) containers, cpu is inside the VM)")
+            // Two columns rather than one run-on string: the project is what you type
+            // at docker, and the owner is what tells you whether you may.
+            // Sized to its own content rather than inherited from the group rows: a
+            // project name and an owner on one line need more room than a worktree label
+            // does, and truncating the owner is what makes the row useless.
+            let projectWidth = min(30, max(12, snapshot.containerGroups
+                                            .map(\.project.count).max() ?? 12))
+            let ownerWidth = min(46, max(16, snapshot.containerGroups.map {
+                ($0.label.isEmpty ? 12 : $0.label.count) + ($0.isReapable ? 13 : 0)
+            }.max() ?? 16))
+            let dockerWidth = projectWidth + ownerWidth + 6
+            for group in snapshot.containerGroups {
+                let owner = (group.label.isEmpty ? "unattributed" : group.label)
+                    + (group.isReapable ? "  (stoppable)" : "")
+                lines.append(pad("  " + truncate(group.project, to: projectWidth),
+                                 to: projectWidth + 4)
+                             + pad(truncate(owner, to: ownerWidth),
+                                   to: max(0, dockerWidth - projectWidth - 4))
+                             + right(group.cpuPercent.map { "\(Int($0.rounded()))%" } ?? "?", 6)
+                             + right(group.rssBytes.map(formatBytes) ?? "?", 8)
+                             + right("\(group.containers.count)", 6))
+            }
+            let stoppable = snapshot.containerGroups.filter(\.isReapable)
+            if !stoppable.isEmpty {
+                let count = stoppable.reduce(0) { $0 + $1.containers.count }
+                lines.append("  \(count) container\(count == 1 ? "" : "s") in "
+                             + "\(stoppable.count) abandoned "
+                             + "project\(stoppable.count == 1 ? "" : "s") can be stopped")
+            }
+            lines.append("")
+        }
+
         if !snapshot.everythingElse.isEmpty {
             lines.append("EVERYTHING ELSE")
             lines += snapshot.everythingElse.map { row($0, asOf: snapshot.machine.capturedAt, width: width) }
@@ -179,8 +214,29 @@ public enum Renderer {
             return row
         }
 
+        let dockerProjects: [[String: Any]] = snapshot.containerGroups.map { group in
+            [
+                "project": group.project,
+                "key": group.key.storageKey,
+                "kind": group.key.kind,
+                "label": group.label,
+                "containerCount": group.containers.count,
+                "containerIds": group.containers.map(\.id),
+                "containerNames": group.containers.map(\.name),
+                // Docker's own figures, which describe the inside of the virtual machine.
+                // Deliberately named apart from the host `cpuPercent` on a group so the
+                // two are never added together by a consumer.
+                "vmCpuPercent": group.cpuPercent ?? NSNull(),
+                "vmRssBytes": group.rssBytes ?? NSNull(),
+                // A Compose stack in a worktree whose session is gone. Never a live
+                // session's stack, never a Testcontainers cluster.
+                "stoppable": group.isReapable,
+            ]
+        }
+
         let document: [String: Any] = [
             "version": jsonVersion,
+            "dockerProjects": dockerProjects,
             "capturedAt": iso8601.string(from: snapshot.machine.capturedAt),
             "machine": machine,
             "groups": groups,
@@ -223,5 +279,267 @@ extension AttributionTier {
         case .containerLabel: return "containerLabel"
         case .unresolved: return "unresolved"
         }
+    }
+}
+
+/// What the live view knows about itself.
+public struct LiveViewStatus: Sendable {
+    public let refreshInterval: TimeInterval
+    /// This process's own CPU across the last interval. The design notes argued against a
+    /// live view on the grounds that it would compete for the cores you are trying to
+    /// free; showing the number settles that by measurement rather than by assertion.
+    public let ownCPUPercent: Double?
+    public let ownRSSBytes: UInt64
+    public let rosterSource: Roster.Source
+
+    public init(refreshInterval: TimeInterval, ownCPUPercent: Double?,
+                ownRSSBytes: UInt64, rosterSource: Roster.Source) {
+        self.refreshInterval = refreshInterval; self.ownCPUPercent = ownCPUPercent
+        self.ownRSSBytes = ownRSSBytes; self.rosterSource = rosterSource
+    }
+}
+
+extension Renderer {
+
+    /// How many rows each block gets, decided before anything is drawn.
+    ///
+    /// Sessions are the headline but orphans are the part a person can act on without
+    /// costing anyone their work, so orphans and the system block are given their rows
+    /// first and sessions take what is left. Observed at load 91 with 21 sessions: the
+    /// orphan block had been squeezed to two rows and "and 2 more", which is the wrong
+    /// thing to hide at exactly the moment it matters.
+    static func allocateRows(available: Int, sessions: Int, orphans: Int,
+                             docker: Int, everythingElse: Int)
+        -> (sessions: Int, orphans: Int, docker: Int, everythingElse: Int) {
+        // A heading and a trailing blank line, per block that appears at all.
+        let overhead = 2
+        func cost(_ rows: Int) -> Int { rows == 0 ? 0 : rows + overhead }
+
+        var orphanRows = min(orphans, 6)
+        var dockerRows = min(docker, 5)
+        var elseRows = min(everythingElse, 5)
+        var sessionRows = min(sessions, max(0, available - cost(orphanRows) - cost(dockerRows)
+                                            - cost(elseRows) - (sessions > 0 ? overhead : 0)))
+
+        // Still over, which happens on a short terminal. Give back in reverse order of
+        // how much the row is worth reading.
+        while cost(sessionRows) + cost(orphanRows) + cost(dockerRows) + cost(elseRows)
+                > available {
+            if elseRows > 1 { elseRows -= 1 }
+            else if sessionRows > 1 { sessionRows -= 1 }
+            else if dockerRows > 1 { dockerRows -= 1 }
+            else if orphanRows > 1 { orphanRows -= 1 }
+            else if elseRows > 0 { elseRows = 0 }
+            else if dockerRows > 0 { dockerRows = 0 }
+            else if sessionRows > 0 { sessionRows = 0 }
+            else if orphanRows > 0 { orphanRows = 0 }
+            else { break }
+        }
+        return (sessionRows, orphanRows, dockerRows, elseRows)
+    }
+
+    /// One full-screen frame, built to fit exactly the terminal it is going into.
+    ///
+    /// Both dimensions are hard limits. A line wider than the terminal wraps and pushes
+    /// everything below it down a row, so the next redraw paints over the wrong lines;
+    /// a frame taller than the terminal scrolls, and a view that scrolls while it
+    /// redraws cannot be read at all.
+    public static func liveFrame(_ snapshot: Snapshot, width: Int, height: Int,
+                                 status: LiveViewStatus) -> String {
+        var lines: [String] = []
+        let machine = snapshot.machine
+
+        let ratio = machine.oversubscription
+        var header = "load \(String(format: "%.1f", machine.loadAverage1))"
+            + "  \(machine.cpuCount) cores"
+        if ratio > 1 { header += "  \(String(format: "%.1f", ratio))x" }
+        let memory = "mem \(String(format: "%.1f", Double(machine.memUsedBytes) / 1_073_741_824))"
+            + "/\(String(format: "%.0f", Double(machine.memTotalBytes) / 1_073_741_824))G"
+        lines.append(fit(header, memory, width: width))
+
+        if case .cached(let age) = status.rosterSource {
+            lines.append(clip("session list is cached (\(Int(age))s old), "
+                              + "reaping is disabled until it refreshes", width))
+        } else if status.rosterSource == .unavailable {
+            lines.append(clip("session list unavailable, sessions below may be live", width))
+        }
+        lines.append("")
+
+        let orphans = snapshot.orphans
+        let rosterIsKnown = status.rosterSource != .unavailable
+        let footerRows = 2
+        let allocation = allocateRows(available: max(0, height - lines.count - footerRows),
+                                      sessions: snapshot.sessions.count,
+                                      orphans: orphans.count,
+                                      docker: snapshot.containerGroups.count,
+                                      everythingElse: snapshot.everythingElse.count)
+
+        func section(_ title: String, _ groups: [AttributionGroup], rows: Int,
+                     summary: String? = nil, showAge: Bool = false) {
+            guard !groups.isEmpty, rows > 0 else { return }
+            lines.append(clip(summary.map { "\(title)  \($0)" } ?? title, width))
+
+            // One row gives way to the count when there is more than fits, so the number
+            // is never itself the thing that got cut.
+            let shown = groups.count > rows ? max(1, rows - 1) : rows
+            for group in groups.prefix(shown) {
+                lines.append(liveRow(group, width: width, showAge: showAge,
+                                     asOf: machine.capturedAt))
+            }
+            if groups.count > shown {
+                lines.append(clip("  and \(groups.count - shown) more", width))
+            }
+            lines.append("")
+        }
+
+        section("CLAUDE SESSIONS", snapshot.sessions, rows: allocation.sessions)
+
+        if rosterIsKnown {
+            // Processes, memory and containers rather than a CPU percentage: an idle
+            // orphan reads as 0% and is still holding a Postgres and 200 MB.
+            let processes = orphans.reduce(0) { $0 + $1.pids.count }
+            let containers = orphans.reduce(0) { $0 + $1.containerIDs.count }
+            let bytes = orphans.reduce(UInt64(0)) { $0 + $1.rssBytes }
+            var summary = "\(processes) processes, \(formatBytes(bytes))"
+            if containers > 0 { summary += ", \(containers) containers" }
+            section("ORPHANED", orphans, rows: allocation.orphans,
+                    summary: summary + " free to reclaim", showAge: true)
+        } else {
+            // Without a roster, a stamped process whose session is simply unlisted
+            // resolves to an orphan. These may be the sessions in front of you. The rows
+            // stay, because the resources are real; the word "orphaned" and the
+            // invitation to stop them do not.
+            section("UNIDENTIFIED", orphans, rows: allocation.orphans,
+                    summary: "no session list, these may be live", showAge: true)
+        }
+
+        dockerSection(snapshot.containerGroups, rows: allocation.docker, width: width,
+                      into: &lines)
+
+        section("EVERYTHING ELSE", snapshot.everythingElse, rows: allocation.everythingElse)
+
+        while lines.count < height - footerRows { lines.append("") }
+
+        let cost = status.ownCPUPercent.map { "\(Int($0.rounded()))%" } ?? "?"
+        lines.append(clip("claude-top \(cost) cpu, \(formatBytes(status.ownRSSBytes)), "
+                          + "every \(Int(status.refreshInterval))s"
+                          + (snapshot.unreadableProcessCount > 0
+                             ? "  ·  \(snapshot.unreadableProcessCount) processes not inspectable"
+                             : ""), width))
+        let offerReap = !orphans.isEmpty && status.rosterSource == .live
+        lines.append(clip("q quit" + (offerReap ? "  ·  claude-top --reap" : ""), width))
+
+        return lines.prefix(height).joined(separator: "\n")
+    }
+
+    /// Containers by the project that brought them up, and who owns that project.
+    ///
+    /// The CPU column is qualified because Docker reports a share of the virtual
+    /// machine's CPUs, not of this Mac's. On this machine the containers totalled 0.4%
+    /// while the VM itself cost 149% on the host, and putting those two in one column
+    /// would invite exactly the wrong conclusion about where the time went.
+    private static func dockerSection(_ groups: [ContainerGroup], rows: Int, width: Int,
+                                      into lines: inout [String]) {
+        guard !groups.isEmpty, rows > 0 else { return }
+
+        let containers = groups.reduce(0) { $0 + $1.containers.count }
+        var heading = "DOCKER  \(containers) containers in \(groups.count) "
+            + "project\(groups.count == 1 ? "" : "s")  ·  cpu is inside the VM"
+
+        // The cheapest resources on the machine to get back: a stack a dead worktree left
+        // running, which nobody is using and which nothing else depends on. Live stacks
+        // and Testcontainers clusters are never counted here.
+        let stoppable = groups.filter(\.isReapable)
+        if !stoppable.isEmpty {
+            let count = stoppable.reduce(0) { $0 + $1.containers.count }
+            let freed = stoppable.allSatisfy { $0.rssBytes != nil }
+                ? " holding " + formatBytes(stoppable.reduce(UInt64(0)) { $0 + ($1.rssBytes ?? 0) })
+                : ""
+            heading += "\n\(count) container\(count == 1 ? "" : "s") in "
+                + "\(stoppable.count) abandoned project\(stoppable.count == 1 ? "" : "s")"
+                + freed + " can be stopped"
+        }
+        for line in heading.split(separator: "\n") { lines.append(clip(String(line), width)) }
+
+        let shown = groups.count > rows ? max(1, rows - 1) : rows
+        for group in groups.prefix(shown) {
+            let cpu = group.cpuPercent.map { "\(Int($0.rounded()))%" } ?? "?"
+            let memory = group.rssBytes.map(formatBytes) ?? "?"
+            let right = self.right(cpu, 6) + self.right(memory, 7)
+                + self.right("\(group.containers.count)c", 5)
+            let room = max(4, width - right.count - 2)
+            // The project on the left, who owns it on the right, because "whose is this"
+            // is the question a container row exists to answer.
+            var owner = group.label.isEmpty ? "unattributed" : group.label
+            if group.isReapable { owner += "  (stoppable)" }
+            let name = truncate(group.project, to: max(8, (room - 5) / 2))
+            lines.append(pad("  " + name + "  " + truncate(owner, to: room - name.count - 6),
+                             to: room) + right)
+        }
+        if groups.count > shown {
+            lines.append(clip("  and \(groups.count - shown) more", width))
+        }
+        lines.append("")
+    }
+
+    /// The frame shown while the first sample is still being gathered.
+    ///
+    /// Load and memory come from `sysctl` and are free; attribution is not. At load 89 a
+    /// cold sample takes twelve seconds of wall time on this machine, and twelve seconds
+    /// of blank screen is how someone concludes the tool is part of the problem.
+    public static func liveFrameCollecting(_ machine: MachineInfo, width: Int,
+                                           height: Int) -> String {
+        let ratio = machine.oversubscription
+        var header = "load \(String(format: "%.1f", machine.loadAverage1))"
+            + "  \(machine.cpuCount) cores"
+        if ratio > 1 { header += "  \(String(format: "%.1f", ratio))x" }
+        let memory = "mem \(String(format: "%.1f", Double(machine.memUsedBytes) / 1_073_741_824))"
+            + "/\(String(format: "%.0f", Double(machine.memTotalBytes) / 1_073_741_824))G"
+
+        var lines = [fit(header, memory, width: width), "",
+                     clip("reading the process table…", width)]
+        while lines.count < height - 1 { lines.append("") }
+        lines.append(clip("q quit", width))
+        return lines.prefix(height).joined(separator: "\n")
+    }
+
+    private static func liveRow(_ group: AttributionGroup, width: Int, showAge: Bool,
+                                asOf: Date) -> String {
+        let cpu = group.cpuPercent.map { "\(Int($0.rounded()))%" } ?? "?"
+        var right = right(cpu, 6) + right(formatBytes(group.rssBytes), 7)
+            + right("\(group.pids.count)p", 5)
+        if group.containerIDs.isEmpty { right += "     " }
+        else { right += self.right("\(group.containerIDs.count)c", 5) }
+        if showAge {
+            right += self.right(group.oldestProcessStartedAt
+                                .map { formatDuration(asOf.timeIntervalSince($0)) } ?? "", 5)
+        }
+
+        let room = max(4, width - right.count - 2)
+        return pad("  " + truncate(displayLabel(group), to: room - 2), to: room) + right
+    }
+
+    /// Left text and right text on one line, with the left giving way first.
+    private static func fit(_ left: String, _ right: String, width: Int) -> String {
+        guard left.count + right.count + 2 <= width else {
+            return clip(left, width)
+        }
+        return left + String(repeating: " ", count: width - left.count - right.count) + right
+    }
+
+    private static func clip(_ text: String, _ width: Int) -> String {
+        text.count <= width ? text : String(text.prefix(width))
+    }
+
+    /// Middles removed rather than tails, because a worktree name is distinguished by
+    /// both ends and `miinto-simple-dynamic-pricing::revenue-sh` tells you less than
+    /// `miinto-simple…revenue-share-page` does.
+    static func truncate(_ text: String, to width: Int) -> String {
+        guard width > 3, text.count > width else {
+            return width <= 3 ? String(text.prefix(max(0, width))) : text
+        }
+        let head = (width - 1) / 2
+        let tail = width - 1 - head
+        return String(text.prefix(head)) + "…" + String(text.suffix(tail))
     }
 }
