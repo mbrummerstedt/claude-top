@@ -72,7 +72,7 @@ terminal with `swift build` and every file is reviewable in git.
 
 ## Fixtures
 
-`Tests/Fixtures/load55-2026-09-10/` is a real capture: 648 processes, 44 carrying session
+`Tests/Fixtures/load55-2026-09-10/` is a real capture: 662 processes, 44 carrying session
 stamps, 5 dead sessions with 27 surviving children, 13 containers spanning all three
 container-attribution tiers. That combination is hard to reproduce on demand, which is why
 it was captured while the machine was actually on fire.

@@ -335,7 +335,7 @@ Snapshot.from(procTable:procEnv:containers:agents:machine:)
 ```
 
 Fixtures live in `Tests/Fixtures/load55-2026-09-10/`, captured from this machine at load
-55.6 by `Scripts/capture-fixture.sh`. They are a realistic corpus: 648 processes, 81 with
+37.9 by `Scripts/capture-fixture.sh`. They are a realistic corpus: 648 processes, 81 with
 session stamps, 5 dead sessions with 27 surviving children, 13 containers across all three
 attribution tiers. Capture is sanitized by an environment-variable allowlist, home paths
 are rewritten to `/Users/USER`, session prompt names are dropped, and a secret scan fails

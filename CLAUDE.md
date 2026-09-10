@@ -41,7 +41,7 @@ without touching the live machine.
 
 Fixture facts you can assert against, measured at capture time:
 
-- 648 processes, 44 carrying a `CLAUDE_CODE_MESSAGING_SOCKET` stamp, across 10 session PIDs
+- 662 processes, 44 carrying a `CLAUDE_CODE_MESSAGING_SOCKET` stamp, across 10 session PIDs
 - 6 more processes carry no stamp but sit in a worktree, which is why tier 3 exists
 - 5 stamped session PIDs are absent from `agents.json`, with 27 surviving child
   processes between them. Those must resolve to `orphan:`, not to `system:`
