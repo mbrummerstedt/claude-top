@@ -32,6 +32,7 @@ USAGE
   claude-top --since <duration> history from the rolling 24h store, e.g. 20m, 2h
   claude-top --sample           one sampler tick written to the store; what launchd runs
   claude-top --statusline       one line for a shell prompt
+  claude-top --hook <event>     pre-tool-use or session-start; see docs/HOOKS.md
   claude-top --reap             stop the leftovers of sessions that are gone
       --dry-run                 show what would be stopped and stop nothing
       --yes                     skip the confirmation, for scripts that already decided
@@ -70,6 +71,92 @@ if flag("--help") || flag("-h") {
 if flag("--version") {
     print("claude-top 0.1.0 (json contract v\(Renderer.jsonVersion))")
     exit(0)
+}
+
+if let event = value("--hook") {
+    // Hooks run on Claude Code's schedule, not a person's. Both of these are on paths
+    // that must stay cheap: the pre-tool-use one runs before every single Bash call, so
+    // it reads the load through sysctl and never samples.
+    //
+    // A hook that fails is a hook that blocks work, so anything unexpected here exits 0
+    // and says nothing. Declining to act is always a safe answer for both of them.
+    let stdin = FileHandle.standardInput.readDataToEndOfFile()
+    let payload = (try? JSONSerialization.jsonObject(with: stdin)) as? [String: Any] ?? [:]
+
+    switch event {
+    case "pre-tool-use":
+        guard payload["tool_name"] as? String == "Bash",
+              var toolInput = payload["tool_input"] as? [String: Any],
+              let command = toolInput["command"] as? String
+        else { exit(0) }
+
+        let machine = MachineProbe.current()
+        guard let capped = Guardrails.cappedCommand(command,
+                                                    loadAverage1: machine.loadAverage1,
+                                                    cpuCount: machine.cpuCount)
+        else { exit(0) }
+
+        toolInput["command"] = capped
+        // Said out loud. A hook that silently rewrites what you asked for is a hook you
+        // stop trusting the first time you notice.
+        let cap = Guardrails.workerCap(loadAverage1: machine.loadAverage1,
+                                       cpuCount: machine.cpuCount) ?? 1
+        let load = String(format: "%.1f", machine.loadAverage1)
+        let reason = "claude-top: load \(load) on \(machine.cpuCount) cores, "
+            + "capped test workers to \(cap)"
+        emit([
+            "systemMessage": reason,
+            "hookSpecificOutput": [
+                "hookEventName": "PreToolUse",
+                "updatedInput": toolInput,
+            ],
+        ])
+
+    case "session-start":
+        // Reads the newest stored row when the sampler has been running, and otherwise
+        // falls back to load alone. Sampling here would add a four second pause to every
+        // session start, on the machine least able to afford it.
+        let snapshot = recentStoredSnapshot() ?? Snapshot(machine: MachineProbe.current(),
+                                                          groups: [])
+        guard let warning = Guardrails.sessionStartWarning(snapshot) else { exit(0) }
+        emit([
+            "hookSpecificOutput": [
+                "hookEventName": "SessionStart",
+                "additionalContext": warning,
+            ],
+        ])
+
+    default:
+        fail("unknown hook '\(event)'. Expected pre-tool-use or session-start.")
+    }
+    exit(0)
+}
+
+func emit(_ document: [String: Any]) {
+    guard let data = try? JSONSerialization.data(withJSONObject: document),
+          let text = String(data: data, encoding: .utf8)
+    else { exit(0) }
+    print(text)
+}
+
+/// The newest stored tick, if the sampler has run recently enough for it to describe the
+/// machine as it is now rather than as it was.
+func recentStoredSnapshot(within age: TimeInterval = 300) -> Snapshot? {
+    guard let store = openStore(), let latest = try? store.latest(),
+          Date().timeIntervalSince(latest.timestamp) < age
+    else { return nil }
+
+    return Snapshot(
+        machine: MachineInfo(cpuCount: latest.cpuCount, memTotalBytes: latest.memTotalBytes,
+                             memUsedBytes: latest.memUsedBytes,
+                             loadAverage1: latest.loadAverage1, capturedAt: latest.timestamp),
+        groups: latest.groups.map {
+            AttributionGroup(key: $0.key, label: $0.label, tier: .envStamp,
+                             cpuPercent: $0.cpuPercent, rssBytes: $0.rssBytes,
+                             pids: Array(repeating: 0, count: $0.processCount),
+                             containerIDs: Array(repeating: "", count: $0.containerCount),
+                             sessionPID: $0.sessionPID)
+        })
 }
 
 if flag("--statusline") {
