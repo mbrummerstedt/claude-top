@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: swift build
+      - name: Test
+        run: swift test
+
+  # Fixtures are captured from a real machine. This is the backstop for the
+  # capture and anonymize scripts: if an identifying detail ever reaches a
+  # commit, fail the build rather than publish it.
+  fixture-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan fixtures for secrets and personal paths
+        run: |
+          set -euo pipefail
+          if grep -rqE '(^|[^A-Za-z0-9-])(sk-[A-Za-z0-9]{16}|ghp_[A-Za-z0-9]{20}|AKIA[0-9A-Z]{16})|BEGIN [A-Z ]*PRIVATE KEY' Tests/Fixtures/; then
+            echo "secret-shaped content in fixtures"; exit 1
+          fi
+          if grep -rqE '/Users/(?!USER)[A-Za-z0-9_.-]+' -P Tests/Fixtures/; then
+            echo "un-rewritten home directory in fixtures"; exit 1
+          fi
+          if [ -f Scripts/anonymize-map.json ]; then
+            echo "anonymize-map.json is committed; it is the reverse lookup and must stay untracked"; exit 1
+          fi
+          echo "fixtures clean"

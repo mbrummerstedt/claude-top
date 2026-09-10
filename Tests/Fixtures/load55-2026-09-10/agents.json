@@ -1,0 +1,100 @@
+[
+  {
+    "pid": 97686,
+    "cwd": "/Users/USER/git_repositories/tradebot/.claude/worktrees/device-identify-2186f8",
+    "kind": "interactive",
+    "startedAt": 1789019037059,
+    "sessionId": "97cf2e5e-01f8-464c-a284-39e0619467ec"
+  },
+  {
+    "pid": 98458,
+    "cwd": "/Users/USER/git_repositories/tradebot/.claude/worktrees/flow-testing-670e04",
+    "kind": "interactive",
+    "startedAt": 1789019057767,
+    "sessionId": "392d6d5a-775f-4fdb-a0eb-0717d56712b3"
+  },
+  {
+    "pid": 56159,
+    "cwd": "/Users/USER",
+    "kind": "interactive",
+    "startedAt": 1789027244880,
+    "sessionId": "5180b502-3b98-4700-aa9d-73f7dabd16c4"
+  },
+  {
+    "pid": 58185,
+    "cwd": "/Users/USER/git_repositories/tradebot/.claude/worktrees/soccer-rebuild-1d2014",
+    "kind": "interactive",
+    "startedAt": 1789027320055,
+    "sessionId": "ea50575b-644f-47a4-b161-76998641df56"
+  },
+  {
+    "pid": 67180,
+    "cwd": "/Users/USER",
+    "kind": "interactive",
+    "startedAt": 1789028198899,
+    "sessionId": "3366d584-e295-4ef6-9762-b6d353f7821b"
+  },
+  {
+    "pid": 96792,
+    "cwd": "/Users/USER/git_repositories/reader-app/.claude/worktrees/account-deletion-d7fb2e",
+    "kind": "interactive",
+    "startedAt": 1789029390827,
+    "sessionId": "ef9210cd-e9fb-42d8-acde-88c03c483898"
+  },
+  {
+    "pid": 1527,
+    "cwd": "/Users/USER/git_repositories/reader-app/.claude/worktrees/terms-page-63c477",
+    "kind": "interactive",
+    "startedAt": 1789029534663,
+    "sessionId": "d12a6fee-27bb-4b8a-b55a-7d0a338bb716"
+  },
+  {
+    "pid": 54117,
+    "cwd": "/Users/USER/git_repositories/tradebot/.claude/worktrees/online-status-cc130f",
+    "kind": "interactive",
+    "startedAt": 1789034095030,
+    "sessionId": "3a94a48b-b0bd-454c-8a99-b1a5ccba4b61"
+  },
+  {
+    "pid": 65122,
+    "cwd": "/Users/USER",
+    "kind": "interactive",
+    "startedAt": 1789034640882,
+    "sessionId": "27a67710-c796-4cb6-a233-d73ef39ffeca"
+  },
+  {
+    "pid": 95420,
+    "cwd": "/Users/USER/git_repositories/chatroom/.claude/worktrees/ui-exploration-abde6f",
+    "kind": "interactive",
+    "startedAt": 1789036543626,
+    "sessionId": "c8128e4f-635c-4c96-9d5c-c05efe7cbca3"
+  },
+  {
+    "pid": 95736,
+    "cwd": "/Users/USER/git_repositories/reader-app/.claude/worktrees/help-desk-51d6e2",
+    "kind": "interactive",
+    "startedAt": 1789036547562,
+    "sessionId": "4f642117-c972-47f4-950c-43a37491288e"
+  },
+  {
+    "pid": 69653,
+    "cwd": "/Users/USER/git_repositories/reader-app/.claude/worktrees/admiring-fermat-3aa813",
+    "kind": "interactive",
+    "startedAt": 1789039126003,
+    "sessionId": "27e8be24-b31f-4c69-8617-773e25c43608"
+  },
+  {
+    "pid": 4420,
+    "cwd": "/Users/USER/git_repositories/tradebot/.claude/worktrees/ui-exploration-290c8f",
+    "kind": "interactive",
+    "startedAt": 1789039888428,
+    "sessionId": "04d4c28c-2d47-410e-9931-cffc18bd1cbf"
+  },
+  {
+    "pid": 19470,
+    "cwd": "/Users/USER",
+    "kind": "interactive",
+    "startedAt": 1789040341937,
+    "sessionId": "7af3bfba-17d4-4c5f-8516-784669ac2521"
+  }
+]

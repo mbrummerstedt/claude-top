@@ -1,0 +1,39 @@
+# Swift / SPM
+.build/
+.swiftpm/
+*.xcodeproj
+*.xcworkspace
+DerivedData/
+
+# Build products
+build/
+dist/
+*.app/
+*.dmg
+
+# The anonymization mapping is the reverse lookup for the fixtures.
+# Committing it would undo the anonymization it performs.
+Scripts/anonymize-map.json
+
+# Raw, un-anonymized captures. Only sanitized fixtures under Tests/Fixtures/ are tracked.
+Tests/Fixtures/raw-*/
+Tests/Fixtures/local-*/
+*.capture
+
+# Local runtime state
+*.db
+*.db-wal
+*.db-shm
+reap.log
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+.infisical.json
+*.pem
+*.p12
+*.mobileprovision
+
+# macOS
+.DS_Store

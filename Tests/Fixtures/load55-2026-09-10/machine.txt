@@ -1,0 +1,4 @@
+ncpu=10
+memtotal_bytes=17179869184
+loadavg= 37.86 39.11 37.32 
+captured_at=2026-09-10T11:57:42Z

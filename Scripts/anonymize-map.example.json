@@ -1,0 +1,23 @@
+{
+  "_comment": [
+    "Copy to anonymize-map.json and fill in with the names from your own capture.",
+    "anonymize-map.json is gitignored on purpose: it is the reverse lookup, and",
+    "committing it would undo the anonymization it performs.",
+    "",
+    "Keep replacements the same shape as the originals. Path depth, hash suffixes and",
+    "container naming patterns are what the fixture is for; only the words should change."
+  ],
+
+  "names": {
+    "my-internal-repo": "widget-service",
+    "some-feature-branch-a1b2c3": "feature-branch-a1b2c3",
+    "internal-compose-project": "widget-stack",
+    "hand-named-container": "widget-db"
+  },
+
+  "forbidden": [
+    "acme-corp",
+    "internal.example.com",
+    "my-github-username"
+  ]
+}
