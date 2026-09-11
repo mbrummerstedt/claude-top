@@ -4,8 +4,9 @@
 *.xcodeproj
 *.xcworkspace
 DerivedData/
+*.dSYM/
 
-# Build products
+# Build products. Scripts/make-app.sh assembles the bundle into build/.
 build/
 dist/
 *.app/
@@ -26,6 +27,14 @@ Tests/Fixtures/local-*/
 *.db-shm
 reap.log
 
+# Claude Code's own working state, which lands inside the repository it is working on.
+# .claude/worktrees/ holds whole checkouts; committing one would nest the repo in itself.
+# Shared configuration under .claude/ is not ignored, so a settings.json meant for
+# everyone can still be committed.
+.claude/worktrees/
+.claude/state/
+.claude/settings.local.json
+
 # Secrets and local config
 .env
 .env.*
@@ -35,5 +44,12 @@ reap.log
 *.p12
 *.mobileprovision
 
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+
 # macOS
 .DS_Store
+._*

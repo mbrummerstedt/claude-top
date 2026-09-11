@@ -1,15 +1,24 @@
-# claude-top — instructions for agents working in this repo
+# claude-top: instructions for agents working in this repo
+
+`claude-top` attributes CPU, memory, processes and containers to the Claude Code session
+that caused them, and stops what is left behind when a session is gone. macOS only, Swift
+6, no third-party packages.
 
 ## Read first
 
-1. `docs/superpowers/specs/2026-09-10-claude-top-design.md` — the design, the measurements
-   it is based on, and why each structural choice was made. Do not re-litigate decisions
-   recorded there without saying so explicitly.
-2. `docs/IMPLEMENTATION-PLAN.md` — the task breakdown and the order to do it in.
+1. [CONTRIBUTING.md](CONTRIBUTING.md) for the setup, the test layout, the changes that
+   get sent back, and the map of what each source file is.
+2. `docs/superpowers/specs/2026-09-10-claude-top-design.md` for the design, the
+   measurements it is based on, and why each structural choice was made. Do not
+   re-litigate decisions recorded there without saying so explicitly.
+3. `docs/IMPLEMENTATION-PLAN.md` for how the work was broken down, kept as the record
+   of what was built in what order.
 
-The design was reached through a brainstorming session with Martin and is approved in
-outline. Three questions were left open; they are listed at the bottom of the spec. If your
-work runs into one of them, ask rather than picking.
+Everything the plan describes is built and in daily use: the engine, the CLI and its live
+view, the menu bar app, the guardrail hooks, and the unattended reaper. One question from
+the spec is still open and is the maintainer's to answer, not yours to pick: whether to
+buy a Developer ID certificate. Until it is answered the app is ad-hoc signed, which runs
+on the machine that built it and hits Gatekeeper anywhere else.
 
 ## The one thing that matters
 
@@ -19,25 +28,21 @@ A number that is confidently wrong is worse than no number, because the whole po
 deciding what to kill. If a process or container cannot be attributed, it goes in the
 `unattributed` bucket and is shown as such. Never guess to make the output look tidier.
 
-## Build order, and don't skip ahead
-
-1. `ClaudeTopKit` — engine, store, sampler. Fully tested against fixtures.
-2. `ClaudeTopCLI` — the `claude-top` binary.
-3. `ClaudeTopApp` — SwiftUI MenuBarExtra and the DMG.
-4. Hooks and guardrails.
-
-The engine comes first because it is the only part you can verify by yourself. You can run
-the CLI, read its output, and check it against `ps`. You cannot see a menu bar. Do not
-start phase 3 while phase 1 has failing or missing tests, and do not report a SwiftUI
-target as working on the basis that it compiled.
+The same rule applies to what you say about your own work. "The tests pass" is a claim you
+make after running them and reading the output.
 
 ## Testing
 
 TDD. Write the failing test first, then the code.
 
-The seam is `Snapshot.from(procTable:procEnv:containers:agents:machine:)` — pure inputs,
-no I/O. Every attribution rule is testable against `Tests/Fixtures/load55-2026-09-10/`
-without touching the live machine.
+The seam is `AttributionEngine.attribute(...)`, a pure function over listings with no I/O.
+Every attribution rule is testable against `Tests/Fixtures/load55-2026-09-10/` without
+touching the live machine.
+
+```bash
+swift test                        # 311 tests, about 20 seconds
+swift test --filter ReapSafety    # the filter matches the type name, not the @Suite name
+```
 
 Fixture facts you can assert against, measured at capture time:
 
@@ -45,9 +50,10 @@ Fixture facts you can assert against, measured at capture time:
 - 6 more processes carry no stamp but sit in a worktree, which is why tier 3 exists
 - 5 stamped session PIDs are absent from `agents.json`, with 27 surviving child
   processes between them. Those must resolve to `orphan:`, not to `system:`
-- 13 containers: 7 with a Compose `working_dir` label, 5 Testcontainers: 3 Postgres carrying distinct
-  `org.testcontainers.session-id` values, plus 2 ryuk reapers, 1 with no labels at all
-  (`sp-chatroom-pg`) which must land in `unattributed`
+- those children plus their own unstamped descendants make 41 processes in 4 orphan groups
+- 13 containers: 7 with a Compose `working_dir` label, 5 Testcontainers (3 Postgres
+  carrying distinct `org.testcontainers.session-id` values plus 2 ryuk reapers), and 1
+  with no labels at all (`sp-chatroom-pg`) which must land in `unattributed`
 - `account-deletion-d7fb2e-db-1` embeds a worktree hash in its container name;
   attribution must still come from the label, not from parsing the name
 
@@ -64,10 +70,11 @@ Never path matches, never ppid matches, never another session's stamp, never a t
 unattributed container. Every kill is logged to `~/.claude/state/reap.log` with the reason
 it was selected. A `.claude-top-keep` file in a worktree exempts it entirely.
 
-**Do not run destructive commands while developing.** Martin's standing rule across all
-repos: the agent does not run `rm -rf`, `git clean`, `git branch -D`, or `kill` on his
-machine. Print the full absolute-path command in a bash code block and let him run it. This
-applies to testing the reaper too — test it against fixtures, not against his live sessions.
+**Do not run destructive commands on the machine you are developing on.** No `rm -rf`, no
+`git clean`, no `git branch -D`, no `kill`. Print the full absolute-path command in a bash
+code block and let a person run it. This applies to testing the reaper most of all: test
+it against the fixtures, never against live sessions, which on a development machine are
+the other agents' work and yours.
 
 **Never rewrite git history.** No rebase, no force-push, no `reset --hard`. If something
 needs changing after the fact, put it in a new commit or a new PR on top.
@@ -79,6 +86,19 @@ SwiftUI, Charts. If you think you need a package, raise it first.
 during the load-55 capture. A sampler tick must degrade to "container CPU unknown", never
 hang.
 
+**Nothing persists a prompt.** The `name` from `claude agents --json` is the user's own
+words. It reaches the terminal table and stops there, not the store, not `--json`, not the
+reap log, not a fixture. `Tests/ClaudeTopKitTests/PromptBoundaryTests.swift` holds that
+line.
+
+## Working on the app
+
+The SwiftUI target is the one part you cannot check by running it and reading the output.
+Compiling is not evidence that it works, and a screenshot of a menu bar is not something
+you can take. Put the logic in `ClaudeTopKit` where a test can reach it, keep the view
+thin, and say plainly which parts of a change you verified and which a person still has to
+look at.
+
 ## Style
 
 Match the surrounding code. Comments explain why, not what.
@@ -86,6 +106,9 @@ Match the surrounding code. Comments explain why, not what.
 Prose in this repo, including commit messages and docs, should read as though a person
 wrote it: no em dashes, no three-item lists for rhythm, no promotional filler, no
 "comprehensive" or "robust" or "seamlessly".
+
+Documentation describes what is true now. Git holds the history, so nothing here says
+"used to be" or narrates what changed.
 
 ## Commits
 

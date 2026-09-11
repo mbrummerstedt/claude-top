@@ -354,7 +354,7 @@ Snapshot.from(procTable:procEnv:containers:agents:machine:)
 ```
 
 Fixtures live in `Tests/Fixtures/load55-2026-09-10/`, captured from this machine at load
-37.9 by `Scripts/capture-fixture.sh`. They are a realistic corpus: 648 processes, 81 with
+37.9 by `Scripts/capture-fixture.sh`. They are a realistic corpus: 662 processes, 44 with
 session stamps, 5 dead sessions with 27 surviving children, 13 containers across all three
 attribution tiers. Capture is sanitized by an environment-variable allowlist, home paths
 are rewritten to `/Users/USER`, session prompt names are dropped, and a secret scan fails
@@ -385,5 +385,8 @@ attributed RSS never exceeds machine total.
 3. Developer ID certificate: worth the paid program for a personal tool, or is development
    signing plus a local install enough?
 
-Question 1 is settled: CLI first, and the CLI is built. Question 2 is still open and
-phase 4 stops at manual `--reap` plus warnings until it is answered.
+Question 1 is settled: CLI first, and the CLI is built. Question 2 is settled too, and the
+answer was yes with a quarantine: unattended reaping exists as `--auto-reap`, is opt-in
+through `Scripts/install-autoreap.sh`, and takes a worktree only after it has been
+continuously observed abandoned for longer than the quarantine. Question 3 is open, and
+the app is ad-hoc signed until it is answered.
