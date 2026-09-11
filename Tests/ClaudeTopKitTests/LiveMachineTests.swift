@@ -145,4 +145,26 @@ struct LiveMachineTests {
             }
         }
     }
+
+    /// The live half of `ReapSafetyTests.neverReapsItself`. The unit test proves the rule
+    /// against a constructed process table; this proves it against whatever this machine
+    /// is running, including a menu bar app or a `--watch` that inherited a live session's
+    /// stamp by having been launched from inside one.
+    @Test("No reap plan on this machine ever selects claude-top itself")
+    func liveReapPlansNeverSelectTheTool() {
+        let sample = Sampler.collect()
+        let attribution = AttributionEngine.resolveProcesses(
+            processes: sample.processes, environments: sample.environments,
+            sessions: sample.sessions)
+
+        for key in Set(attribution.values.map(\.key)) {
+            let plan = AttributionEngine.reapPlan(
+                for: key, processes: sample.processes, environments: sample.environments,
+                containers: sample.containers, roster: sample.roster)
+            for selected in plan.processes {
+                #expect(!AttributionEngine.isOwnMachinery(selected.command),
+                        "a reap plan for \(key) selected this tool: \(selected.command)")
+            }
+        }
+    }
 }
