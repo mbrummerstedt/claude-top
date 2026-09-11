@@ -106,6 +106,7 @@ It writes one file, `~/Library/LaunchAgents/com.claudetop.sampler.plist`.
 | `claude-top --sample` | One sampler tick; what the LaunchAgent runs |
 | `claude-top --statusline` | One line for a shell prompt |
 | `claude-top --reap` | Stop the leftovers of sessions that are gone |
+| `claude-top --auto-reap` | Unattended; only worktrees abandoned past a quarantine |
 | `claude-top --hook <event>` | Guardrail hooks; see [docs/HOOKS.md](docs/HOOKS.md) |
 
 There is no full-screen auto-refreshing TUI, deliberately. At load 55 the thing you open to
@@ -143,6 +144,61 @@ Every group says whether it can safely be stopped and which PIDs that would mean
 It reads the newest stored row rather than sampling, so it costs one indexed query and
 runs in about 10ms. This is the part Activity Monitor structurally cannot provide, because
 it has no concept of "this session".
+
+## The menu bar app
+
+```bash
+Scripts/install-app.sh
+```
+
+Puts `ClaudeTop.app` in `/Applications`. The menu bar shows CPU percent, coloured as the
+machine fills up. Clicking gives abandoned worktrees first, each with what it is holding,
+what it is made of, and its own Stop; then sessions, Docker by project, and everything
+else. A toggle at the bottom starts it with the machine, registered through
+`SMAppService` so it appears in System Settings under Login Items and can be revoked
+there.
+
+While the app is running it owns sampling and the LaunchAgent stands down, so there is
+never a second writer.
+
+## Stopping old work automatically
+
+Everything else here puts a list in front of you before anything stops. This one runs from
+a timer, so it is narrower than all of it, and it is opt-in:
+
+```bash
+Scripts/install-autoreap.sh /usr/local/bin/claude-top 8h
+```
+
+The question an unattended reaper has to answer is not "is this abandoned" but "has this
+been abandoned long enough that nothing could still want it". **Process age cannot answer
+that**: a session that exited a minute ago can own a process three days old, and a rule
+based on process age would take it instantly.
+
+So the clock measures something else: how long a worktree has been *continuously observed*
+with no session behind it. That is remembered across runs, and
+
+- a worktree that gets a session again is forgotten, so its clock restarts from zero
+- a gap in observation longer than half an hour restarts the clock too, because a machine
+  that was asleep saw nothing and a session could have come and gone unnoticed
+- a worktree first seen on this very run is never eligible, whatever its processes' ages
+- a quarantine of zero is refused rather than obeyed, since it removes the only thing
+  making any of this safe
+
+On top of the selection rules that apply everywhere: env stamp only, Compose `working_dir`
+only, never a live session, never a Testcontainers cluster, never an unlabelled container,
+and `.claude-top-keep` exempts a worktree entirely. A run stops at most three worktrees, so
+any future mistake stays small enough to notice and recover from, and the backlog is
+worked through over successive runs.
+
+Watch it before trusting it:
+
+```bash
+claude-top --auto-reap --older-than 8h --dry-run
+```
+
+`~/.claude/state/reap.log` records every signal with the reason it was selected.
+`Scripts/uninstall-autoreap.sh` removes it and leaves that log alone.
 
 ## Guardrails
 
@@ -230,7 +286,8 @@ for why each structural choice was made.
 
 ## Status
 
-The engine, the CLI and the guardrail hooks work. The menu bar app is not built yet.
+In daily use: the engine, the CLI, the live view, the guardrail hooks, the menu bar app,
+and the unattended reaper.
 
 ## License
 

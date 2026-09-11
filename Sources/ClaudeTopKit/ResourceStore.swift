@@ -76,6 +76,12 @@ public final class ResourceStore {
             CREATE TABLE IF NOT EXISTS cpu_baseline (
                 pid INTEGER PRIMARY KEY, ts REAL, cpu_time REAL, started_at REAL);
             """)
+        // When each abandoned worktree was first seen with no session behind it. The one
+        // fact an unattended reap rests on, and the one no single sample can observe.
+        try execute("""
+            CREATE TABLE IF NOT EXISTS orphan_seen (
+                key TEXT PRIMARY KEY, first_seen INTEGER, last_seen INTEGER);
+            """)
         try execute("CREATE INDEX IF NOT EXISTS attribution_ts ON attribution (ts)")
         try execute("CREATE INDEX IF NOT EXISTS proc_detail_ts ON proc_detail (ts)")
     }
@@ -162,6 +168,64 @@ public final class ResourceStore {
             try? execute("ROLLBACK")
             throw error
         }
+    }
+
+    /// How long an observation gap may be before the clock restarts.
+    ///
+    /// A machine that was asleep, or a sampler that was not installed, saw nothing. Nine
+    /// hours of abandonment cannot be claimed across a gap in which a session could have
+    /// come and gone unnoticed.
+    public static let observationGap: TimeInterval = 30 * 60
+
+    /// Note which worktrees are abandoned right now.
+    ///
+    /// Keys absent from `orphans` are forgotten: that worktree has a session again, and
+    /// its clock must not carry on from before.
+    public func recordOrphans(_ orphans: [AttributionKey], at date: Date) throws {
+        let stamp = Int64(date.timeIntervalSince1970)
+        let keys = Set(orphans.map(\.storageKey))
+        let known = try orphanRecords()
+
+        try execute("BEGIN IMMEDIATE")
+        do {
+            for key in known.keys where !keys.contains(key) {
+                try run("DELETE FROM orphan_seen WHERE key = ?") { bindText($0, 1, key) }
+            }
+            for key in keys {
+                // A gap in observation restarts the clock; a normal sampling interval
+                // does not.
+                let continuous = known[key].map {
+                    stamp - $0.lastSeen <= Int64(Self.observationGap) && $0.firstSeen <= stamp
+                } ?? false
+                let firstSeen = continuous ? (known[key]?.firstSeen ?? stamp) : stamp
+                try run("INSERT OR REPLACE INTO orphan_seen VALUES (?, ?, ?)") {
+                    bindText($0, 1, key)
+                    sqlite3_bind_int64($0, 2, firstSeen)
+                    sqlite3_bind_int64($0, 3, stamp)
+                }
+            }
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
+    /// When each currently abandoned worktree was first seen that way.
+    public func orphanedSince() -> [String: Date] {
+        let records = (try? orphanRecords()) ?? [:]
+        return records.mapValues { Date(timeIntervalSince1970: Double($0.firstSeen)) }
+    }
+
+    private func orphanRecords() throws -> [String: (firstSeen: Int64, lastSeen: Int64)] {
+        var out: [String: (firstSeen: Int64, lastSeen: Int64)] = [:]
+        try query("SELECT key, first_seen, last_seen FROM orphan_seen") { statement in
+            while sqlite3_step(statement) == SQLITE_ROW {
+                out[String(cString: sqlite3_column_text(statement, 0))] =
+                    (sqlite3_column_int64(statement, 1), sqlite3_column_int64(statement, 2))
+            }
+        }
+        return out
     }
 
     public func prune(before date: Date) throws {
