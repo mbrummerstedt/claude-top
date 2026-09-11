@@ -158,6 +158,12 @@ too narrow rather than nearly right:
 - Every signal is appended to `~/.claude/state/reap.log` with the reason it was selected.
 - `--reap` confirms interactively and defaults to no.
 
+From inside the live view, `r` shows everything that would be stopped before anything is,
+and anything other than `y` cancels. The roster and the process table are re-read at that
+moment rather than reused from the last redraw: a session started since then would look
+abandoned, and a PID recycled since then would point at something else. What the screen
+lists is exactly what gets signalled, with nothing rebuilt in between.
+
 The test suite's most important case is that a reap of one session selects zero processes
 belonging to another.
 

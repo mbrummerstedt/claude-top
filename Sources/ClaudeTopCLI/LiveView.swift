@@ -82,8 +82,78 @@ enum LiveView {
             previous = sample.processes
             previousAt = sample.processesReadAt
 
-            if waitForQuit(upTo: interval) { break }
+            switch waitForKey(upTo: interval) {
+            case .quit:
+                return
+            case .reap:
+                if reap(collector: collector, interval: interval) { return }
+            case .refresh:
+                continue
+            }
         }
+    }
+
+    // MARK: - reaping
+
+    private enum Action { case quit, reap, refresh }
+
+    /// The stop path. Returns true if the user quit out of it.
+    ///
+    /// Everything is re-read before anything is shown. Acting on the list from the last
+    /// tick would mean a session started since then looks abandoned, and a pid recycled
+    /// since then points at something else entirely. A fresh read costs a second and
+    /// removes both.
+    private static func reap(collector: IncrementalCollector, interval: TimeInterval) -> Bool {
+        let size = terminalSize()
+        draw(Renderer.reapRefusal("checking what can be stopped…",
+                                  width: size.columns, height: size.rows))
+
+        // The roster is what separates "this session exited" from "this session was not
+        // listed", and only a reading from just now can tell them apart.
+        let roster = SessionRoster.live()
+        guard roster.allowsReaping else {
+            draw(Renderer.reapRefusal(
+                "The session list could not be read just now, so every live session would "
+                + "look abandoned. Nothing was stopped. Check that `claude agents --json` "
+                + "responds, then try again.",
+                width: size.columns, height: size.rows))
+            return waitForAnyKey() == .quit
+        }
+
+        let sample = collector.collect(containers: ContainerCollector.current(timeout: 5),
+                                       roster: roster)
+        let snapshot = Sampler.attribute(sample, cpuPercents: [:])
+        let keep = Reaper.keepMarkedWorktrees(in: sample)
+
+        let proposals: [ReapProposal] = snapshot.orphans.compactMap { group in
+            let plan = AttributionEngine.reapPlan(
+                for: group.key, processes: sample.processes,
+                environments: sample.environments, containers: sample.containers,
+                roster: roster, keepMarkedWorktrees: keep)
+            guard !plan.isEmpty else { return nil }
+            return ReapProposal(
+                plan: plan, label: group.label,
+                age: group.oldestProcessStartedAt.map {
+                    sample.machine.capturedAt.timeIntervalSince($0)
+                })
+        }
+
+        draw(Renderer.reapConfirmation(proposals, width: size.columns, height: size.rows))
+        guard !proposals.isEmpty else { return waitForAnyKey() == .quit }
+
+        // Anything other than an explicit yes is a no.
+        let answer = waitForAnyKey()
+        if answer == .quit { return true }
+        guard answer == .confirm else { return false }
+
+        // Exactly the plans that were shown. Nothing is rebuilt between reading and
+        // acting, so nothing can join the list after it has been agreed to.
+        let reaper = Reaper()
+        let results = proposals.map {
+            (label: $0.label, outcome: reaper.execute($0.plan))
+        }
+        draw(Renderer.reapOutcome(results, width: size.columns, height: size.rows))
+        return waitForAnyKey() == .quit
     }
 
     // MARK: - drawing
@@ -136,24 +206,48 @@ enum LiveView {
         return original
     }
 
-    /// Sleep until the next redraw, unless a quit key arrives first. Returns true to stop.
+    /// Sleep until the next redraw, unless a key arrives first.
     ///
-    /// Polled in short slices rather than one long sleep so `q` feels immediate at a
-    /// fifteen second refresh instead of taking up to fifteen seconds to register.
-    private static func waitForQuit(upTo interval: TimeInterval) -> Bool {
+    /// Polled in short slices rather than one long sleep so a keystroke feels immediate at
+    /// a fifteen second refresh instead of taking up to fifteen seconds to register.
+    private static func waitForKey(upTo interval: TimeInterval) -> Action {
         let slice = 0.05
         var waited = 0.0
         while waited < interval {
-            if interrupted { return true }
-
-            var byte: UInt8 = 0
-            if read(STDIN_FILENO, &byte, 1) == 1 {
-                // q, Q, Ctrl-C, or Escape.
-                if byte == 0x71 || byte == 0x51 || byte == 0x03 || byte == 0x1B { return true }
+            if interrupted { return .quit }
+            if let key = pressedKey() {
+                switch key {
+                case 0x71, 0x51, 0x03, 0x1B: return .quit   // q, Q, Ctrl-C, Escape
+                case 0x72, 0x52: return .reap               // r, R
+                default: return .refresh                    // anything else redraws now
+                }
             }
             Thread.sleep(forTimeInterval: slice)
             waited += slice
         }
-        return false
+        return .refresh
+    }
+
+    private enum Answer { case confirm, dismiss, quit }
+
+    /// Block until something is pressed. Used by the screens that are waiting on a person
+    /// rather than on a clock.
+    private static func waitForAnyKey() -> Answer {
+        while !interrupted {
+            if let key = pressedKey() {
+                switch key {
+                case 0x79, 0x59: return .confirm            // y, Y
+                case 0x03: return .quit                     // Ctrl-C
+                default: return .dismiss
+                }
+            }
+            Thread.sleep(forTimeInterval: 0.03)
+        }
+        return .quit
+    }
+
+    private static func pressedKey() -> UInt8? {
+        var byte: UInt8 = 0
+        return read(STDIN_FILENO, &byte, 1) == 1 ? byte : nil
     }
 }

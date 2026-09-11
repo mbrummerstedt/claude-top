@@ -112,6 +112,27 @@ public struct Reaper {
         }
     }
 
+    /// Worktrees carrying a `.claude-top-keep` file, which exempts them entirely.
+    ///
+    /// Read from the paths the sample already knows about rather than by walking the
+    /// disk, so it costs a handful of `stat` calls and cannot wander outside the
+    /// directories that are actually in use.
+    public static func keepMarkedWorktrees(in sample: RawSample) -> Set<String> {
+        var marked: Set<String> = []
+        let candidates = Set(sample.environments.values.compactMap(\.pwd)
+                             + sample.sessions.map(\.cwd))
+        for path in candidates {
+            guard let marker = path.range(of: "/.claude/worktrees/"),
+                  let name = path[marker.upperBound...].split(separator: "/").first
+            else { continue }
+            let root = String(path[path.startIndex..<marker.upperBound]) + name
+            if FileManager.default.fileExists(atPath: root + "/.claude-top-keep") {
+                marked.insert(root)
+            }
+        }
+        return marked
+    }
+
     public static let dockerStop: @Sendable (String) -> Bool = { id in
         guard let docker = Shell.locate("docker") else { return false }
         return Shell.run(docker, ["stop", id], timeout: 15) != nil
