@@ -446,7 +446,8 @@ struct Abandoned: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .firstTextBaseline) {
-                Text("ABANDONED").font(.caption2.bold()).foregroundStyle(.secondary)
+                // ORPHANED, the same word the CLI, the JSON `kind` and the spec use.
+                Text("ORPHANED").font(.caption2.bold()).foregroundStyle(.secondary)
                 Text("no session is using these")
                     .font(.caption2).foregroundStyle(.tertiary)
                 Spacer()
