@@ -195,9 +195,11 @@ final class ResourceModel: ObservableObject {
 
         let result = await Task.detached(priority: .utility) {
             () -> (Snapshot, RawSample, [Int32: Double])? in
-            let containers = ContainerCollector.current(timeout: 5)
+            let listing = ContainerCollector.current(timeout: 5)
             let roster = SessionRoster.live()
-            let sample = collector.collect(containers: containers, roster: roster)
+            let sample = collector.collect(containers: listing.containers,
+                                           dockerAnswered: listing.answered,
+                                           roster: roster)
             let cpu = AttributionEngine.cpuPercents(
                 earlier: baseline, earlierAt: baselineAt,
                 later: sample.processes, laterAt: sample.processesReadAt)
@@ -231,7 +233,7 @@ final class ResourceModel: ObservableObject {
         // listed", and that difference decides whether live work lands on a kill list.
         guard sample.roster.allowsReaping else {
             state = .refused("The session list could not be read just now, so every live "
-                             + "session would look abandoned. Nothing was stopped. Check "
+                             + "session would look orphaned. Nothing was stopped. Check "
                              + "that `claude agents --json` responds, then try again.")
             return
         }
@@ -304,7 +306,7 @@ final class ResourceModel: ObservableObject {
             guard sample.roster.allowsReaping else {
                 stopping.subtract(batch)
                 state = .refused("The session list could not be read just now, so every "
-                                 + "live session would look abandoned. Nothing was stopped.")
+                                 + "live session would look orphaned. Nothing was stopped.")
                 return
             }
 
@@ -444,7 +446,8 @@ struct Abandoned: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .firstTextBaseline) {
-                Text("ABANDONED").font(.caption2.bold()).foregroundStyle(.secondary)
+                // ORPHANED, the same word the CLI, the JSON `kind` and the spec use.
+                Text("ORPHANED").font(.caption2.bold()).foregroundStyle(.secondary)
                 Text("no session is using these")
                     .font(.caption2).foregroundStyle(.tertiary)
                 Spacer()

@@ -16,31 +16,38 @@ yesterday still has a watcher and a Postgres container running.
 CPU 95%   9.5 of 10 cores busy
 memory 12.4 / 16.0 GB
 19 threads queued for 10 cores, so everything waits
-this sees 6.5 of those cores; 3.0 are in 185 processes macOS will not let it read
+6.5 of those cores are accounted for below; 3.0 unaccounted
+that is kernel time plus 264 processes macOS hides from unprivileged tools
+rows below are per-core, as in Activity Monitor: 100% is one core
 
-CLAUDE SESSIONS                                CPU     RAM  PROC  DOCKER
-  reader-app::terms-page                      291%    281M     7       0
+CLAUDE SESSIONS                                CPU    RAM PROC DOCKER DOCKER CPU
+  reader-app::terms-page                      291%   281M    7      0          —
     └ 9x vitest           260%   190M
     └ claude               22%    71M
     └ node                  9%    20M
-  tradebot::device-identification             118%    489M    13       3
-  feed-service::search-ranking                 36%    232M     5       0
-  ~ "draft the release notes"                   4%     26M     1       0
+  tradebot::device-identification             118%   489M   13      3        47%
+  feed-service::search-ranking                 36%   232M    5      0          —
+  ~ "draft the release notes"                   4%    26M    1      0          —
+  TOTAL                                       449%   1.0G   26      3        47%
 
-ORPHANED (worktrees with no live session)      12%    225M    20       3
-  tradebot::odds-cache-spike-investigation      6%    143M     5       0    2d
-  feed-service::ui-improvements                 3%     30M     6       2   17h
-  reader-app::help-desk                         3%     32M     4       0    1h
-  platform::qa-testing                          0%     20M     5       1   21h
+ORPHANED (worktrees with no live session)      CPU    RAM PROC DOCKER DOCKER CPU   AGE
+  tradebot::odds-cache-spike-investigation      6%   143M    5      0          —    2d
+  feed-service::ui-improvements                 3%    30M    6      2        34%   17h
+  reader-app::help-desk                         3%    32M    4      0          —    1h
+  platform::qa-testing                          0%     0M    0      1        18%   21h
+  TOTAL                                        12%   205M   15      3        52%
 
-EVERYTHING ELSE
-  Docker                                      120%    2.3G    10       0
-  Other processes                              30%    1.9G   212       0
-  Chrome                                       25%    1.5G    47       0
-  Claude desktop app                           14%    952M    38       0
-  Unattributed                                  0%      0M     0       1
+EVERYTHING ELSE                                CPU    RAM PROC DOCKER DOCKER CPU
+  Docker                                      120%   2.3G   10      0          —
+  Other processes                              30%   1.9G  212      0          —
+  Chrome                                       25%   1.5G   47      0          —
+  Claude desktop app                           14%   952M   38      0          —
+  Unattributed                                  0%     0M    0      1         2%
+  TOTAL                                       189%   6.6G  307      1         2%
 
-185 processes belong to other users and cannot be inspected
+264 of 612 processes belong to other users and cannot be inspected: their CPU and
+memory are missing from every row above
+RAM is resident size: pages shared between processes are counted once in each
 ```
 
 Then take the machine back:
@@ -134,7 +141,7 @@ rm -f ~/.claude/state/resources.db             # the rolling 24h of history
 | `claude-top --sample` | One sampler tick; what the LaunchAgent runs |
 | `claude-top --statusline` | One line for a shell prompt |
 | `claude-top --reap` | Stop the leftovers of sessions that are gone |
-| `claude-top --auto-reap` | Unattended; only worktrees abandoned past a quarantine |
+| `claude-top --auto-reap` | Unattended; only worktrees orphaned past a quarantine |
 | `claude-top --hook <event>` | Guardrail hooks; see [docs/HOOKS.md](docs/HOOKS.md) |
 
 `--dry-run` shows what a reap would stop and stops nothing. `--yes` skips the confirmation
@@ -142,12 +149,12 @@ for a script that has already decided.
 
 ### The live view
 
-`--watch` redraws in place, `q` quits, and `r` offers to stop the abandoned worktrees. The
+`--watch` redraws in place, `q` quits, and `r` offers to stop the orphaned worktrees. The
 footer says what the tool itself is costing while you watch it:
 
 ```
 claude-top 2% cpu, 14M, every 5s  ·  185 processes not inspectable
-q quit  ·  r stop the abandoned ones
+q quit  ·  r stop the orphaned ones
 ```
 
 That line is there because the objection to a live view on a machine at load 55 is a real
@@ -163,12 +170,14 @@ Compose projects are grouped by the worktree their `working_dir` label points at
 container is charged to the work that started it rather than to Docker:
 
 ```
-DOCKER (7 containers, cpu is inside the VM)
+DOCKER (7 containers)
+  container CPU is measured inside the VM, and is already part of the Docker row
+  in EVERYTHING ELSE, not extra to it
   tradebot_devices         tradebot::device-identification                22%    410M     3
   feed_ui_improvements     feed-service::ui-improvements  (stoppable)      4%    180M     2
   platform_qa              platform::qa-testing  (stoppable)               1%     90M     1
   testcontainers 9db46124  unattributed                                    2%    120M     1
-  3 containers in 2 abandoned projects can be stopped
+  3 containers in 2 orphaned projects can be stopped
 ```
 
 Container CPU is measured inside the VM and the host sees the VM's own total, which is why
@@ -190,11 +199,35 @@ Every group carries the PIDs behind it and what the tool may do with them:
   "rssBytes": 31457280,
   "processCount": 6,
   "containerCount": 2,
+  "containerCpuPercent": 34.0,
   "ageSeconds": 62400,
   "reapable": true,
   "pids": [46341, 46352, 46390]
 }
 ```
+
+The `machine` block carries the headline figures, so a consumer can say what share of the
+machine a total represents rather than summing rows and hoping:
+
+```json
+{
+  "cpuCount": 10,
+  "busyPercent": 95.0,
+  "busyCores": 9.5,
+  "unaccountedCores": 3.0,
+  "unreadableProcessCount": 264,
+  "processCount": 612
+}
+```
+
+Every group's `cpuPercent` is per-core, where a process on two cores reads `200`.
+`busyPercent` is a share of the whole machine and `busyCores` is the bridge between the
+two. `unaccountedCores` is how far the rows fall short of the machine, which is the
+measure of how much of it this snapshot actually describes: it holds kernel time,
+processes owned by other users, and whatever the sampling window missed, and an
+unprivileged tool cannot separate them.
+
+`containerCpuPercent` is measured inside the VM and is never added to `cpuPercent`.
 
 `kind` is the field that says whether anyone is still behind a group: `orphan` means the
 session that started it is gone. `reapable` is narrower than it sounds and says only
@@ -209,8 +242,8 @@ today keeps working when fields are added.
 ### Statusline
 
 ```
-load 4.2/10  self 12%
-⚠ load 55.6/10  self 291%
+load 4.2/10  self 0.1 cores
+⚠ load 55.6/10  self 2.9 cores
 ```
 
 `self` is the session whose shell invoked it, identified by that process's own stamp, so
@@ -227,7 +260,7 @@ Scripts/install-app.sh
 ```
 
 Puts `ClaudeTop.app` in `/Applications`. The menu bar shows CPU percent, coloured as the
-machine fills up. Clicking gives abandoned worktrees first, each with what it is holding,
+machine fills up. Clicking gives orphaned worktrees first, each with what it is holding,
 what it is made of, and its own Stop; then sessions, Docker by project, and everything
 else. A toggle at the bottom starts it with the machine, registered through `SMAppService`
 so it appears in System Settings under Login Items and can be revoked there.
@@ -237,7 +270,7 @@ does not change. Several can be asked for at once, each showing its spinner from
 rather than from its turn. They are carried out one at a time behind the panel, because
 each stop signals a set of processes and waits five seconds for them to go, and a machine
 that needs this is not one to run several of those on at once. The row already names the
-worktree, how long it has been abandoned, what it is holding and what it is made of, so
+worktree, how long it has been orphaned, what it is holding and what it is made of, so
 the scope is on screen before the button is pressed. Stopping everything keeps its
 confirmation, because there the scope is not all visible at once.
 

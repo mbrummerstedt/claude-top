@@ -276,10 +276,18 @@ public struct Snapshot: Sendable {
     /// when two readings were available to diff.
     public let systemCPU: SystemCPU?
 
+    /// Whether docker answered at all. An empty container listing means both "there are
+    /// none" and "docker timed out", and at load 38 the second happens often: `docker ps`
+    /// took 48 seconds on the machine this was written on while the collector waits 3.
+    /// Reporting that as zero containers is a measurement this never made.
+    public let dockerAnswered: Bool
+
     public init(machine: MachineInfo, groups: [AttributionGroup],
-                containerGroups: [ContainerGroup] = [], systemCPU: SystemCPU? = nil) {
+                containerGroups: [ContainerGroup] = [], systemCPU: SystemCPU? = nil,
+                dockerAnswered: Bool = true) {
         self.machine = machine; self.groups = groups
         self.containerGroups = containerGroups; self.systemCPU = systemCPU
+        self.dockerAnswered = dockerAnswered
     }
 
     /// Everything this tool could place, in per-core units.
@@ -287,8 +295,18 @@ public struct Snapshot: Sendable {
         groups.reduce(0) { $0 + ($1.cpuPercent ?? 0) }
     }
 
-    /// The share of the machine's work that happened in processes this user may not
-    /// inspect: the kernel, the window server, other users' daemons.
+    /// The share of the machine's work this tool could not place.
+    ///
+    /// A residual, and it must be described as one. It holds three things at once: the
+    /// kernel's own time, which belongs to no process at all; processes owned by other
+    /// users, which `libproc` refuses to answer for at any granularity; and whatever the
+    /// sampling window missed. An unprivileged process has no way to separate them, so
+    /// naming it after any one of them is a guess presented as a measurement.
+    ///
+    /// It was previously reported as being entirely other users' processes. Measured
+    /// against `top`, which is setuid root and can see what this cannot, that was wrong
+    /// by a factor of four and swung between 0.8 and 4.5 cores across three consecutive
+    /// runs while the real figure held steady.
     ///
     /// Stated rather than left as a discrepancy for someone to find. On a busy Mac it is
     /// large, and a tool showing the smaller number without explaining it reads as wrong
@@ -315,6 +333,38 @@ public struct Snapshot: Sendable {
         // past the machine total. A negative gap would be nonsense on screen.
         return max(0, systemCPU.busyPerCore(cpuCount: machine.cpuCount)
                       - attributedCPUPercent)
+    }
+
+    /// A section's columns added up.
+    ///
+    /// Activity Monitor puts these at the bottom of its window. Without them a reader is
+    /// left adding a column in their head, and this table has two different CPU units in
+    /// it, so that addition is one most people would get wrong.
+    public struct SectionTotals: Sendable, Equatable {
+        public let cpuPercent: Double?
+        public let rssBytes: UInt64
+        public let processCount: Int
+        public let containerCount: Int
+        public let containerCPUPercent: Double?
+    }
+
+    /// Unknown is contagious on purpose. If any member's CPU could not be read the total
+    /// is unknown, because a sum over the ones that answered looks complete and is not.
+    public static func totals(of groups: [AttributionGroup]) -> SectionTotals {
+        let withContainers = groups.filter { !$0.containerIDs.isEmpty }
+        let containerCPU = withContainers.isEmpty
+            || !withContainers.allSatisfy { $0.containerCPUPercent != nil }
+            ? nil
+            : withContainers.reduce(0.0) { $0 + ($1.containerCPUPercent ?? 0) }
+
+        return SectionTotals(
+            cpuPercent: groups.isEmpty || !groups.allSatisfy { $0.cpuPercent != nil }
+                ? nil
+                : groups.reduce(0.0) { $0 + ($1.cpuPercent ?? 0) },
+            rssBytes: groups.reduce(UInt64(0)) { $0 + $1.rssBytes },
+            processCount: groups.reduce(0) { $0 + $1.pids.count },
+            containerCount: groups.reduce(0) { $0 + $1.containerIDs.count },
+            containerCPUPercent: containerCPU)
     }
 
     public var sessions: [AttributionGroup] {

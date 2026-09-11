@@ -171,6 +171,21 @@ struct LiveFrameTests {
         #expect(!text.contains("can be stopped"))
     }
 
+    @Test("An orphan's container cost reaches the live view too")
+    func liveOrphanShowsContainerCPU() {
+        // The same trap as the static table: no surviving host process, so the CPU cell
+        // is a truthful zero while the compose project it left behind is still working.
+        // The two views must not disagree about what a row costs.
+        let idle = AttributionGroup(
+            key: .orphan(repo: "enumstudio", worktree: "i-1338"),
+            label: "enumstudio::enumstudio-i-1338", tier: .containerLabel,
+            cpuPercent: 0, rssBytes: 0,
+            containerCPUPercent: 24, containerRSSBytes: 9_437_184,
+            pids: [], containerIDs: ["c1"],
+            oldestProcessStartedAt: Date(timeIntervalSince1970: 1_757_500_000 - 3600))
+        #expect(frame([idle]).contains("24%"))
+    }
+
     @Test("A testcontainers cluster is never offered, however abandoned it looks")
     func testcontainersNeverOffered() {
         let text = frame([], containers: [

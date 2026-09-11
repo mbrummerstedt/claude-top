@@ -41,7 +41,9 @@ enum LiveView {
         // The slow sources change on a human timescale, not a redraw one.
         let slowCycle = max(1, Int((15.0 / max(interval, 1)).rounded()))
         var tick = 0
-        var containers: [ContainerInfo] = []
+        // Starts as "no answer yet" rather than "no containers": the first slow cycle has
+        // not run, so nothing has been asked.
+        var listing = ContainerCollector.Listing(containers: [], answered: false)
         var roster = Roster(sessions: [], source: .unavailable)
 
         // On screen before anything expensive happens. Load and memory are `sysctl`
@@ -58,12 +60,14 @@ enum LiveView {
 
         while !interrupted {
             if tick % slowCycle == 0 {
-                containers = ContainerCollector.current(timeout: 3)
+                listing = ContainerCollector.current(timeout: 3)
                 roster = SessionRoster.live()
             }
             tick += 1
 
-            let sample = collector.collect(containers: containers, roster: roster)
+            let sample = collector.collect(containers: listing.containers,
+                                           dockerAnswered: listing.answered,
+                                           roster: roster)
             let cpu = AttributionEngine.cpuPercents(
                 earlier: previous, earlierAt: previousAt,
                 later: sample.processes, laterAt: sample.processesReadAt)
@@ -114,13 +118,15 @@ enum LiveView {
         guard roster.allowsReaping else {
             draw(Renderer.reapRefusal(
                 "The session list could not be read just now, so every live session would "
-                + "look abandoned. Nothing was stopped. Check that `claude agents --json` "
+                + "look orphaned. Nothing was stopped. Check that `claude agents --json` "
                 + "responds, then try again.",
                 width: size.columns, height: size.rows))
             return waitForAnyKey() == .quit
         }
 
-        let sample = collector.collect(containers: ContainerCollector.current(timeout: 5),
+        let reapListing = ContainerCollector.current(timeout: 5)
+        let sample = collector.collect(containers: reapListing.containers,
+                                       dockerAnswered: reapListing.answered,
                                        roster: roster)
         let snapshot = Sampler.attribute(sample, cpuPercents: [:])
         let keep = Reaper.keepMarkedWorktrees(in: sample)
