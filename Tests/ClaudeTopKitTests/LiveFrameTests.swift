@@ -233,12 +233,15 @@ struct LiveFrameTests {
         #expect(!frame([varied]).contains("└"))
     }
 
-    @Test("The header carries load, cores and oversubscription")
+    @Test("The header carries CPU and cores, and the queue when there is one")
     func header() {
-        let text = frame([])
-        #expect(text.contains("43.1"))
-        #expect(text.contains("10 cores"))
-        #expect(text.contains("4.3x"))
+        let text = Renderer.liveFrame(
+            Snapshot(machine: machine(load: 43.1), groups: [],
+                     systemCPU: SystemCPU(userPercent: 20, systemPercent: 11)),
+            width: 100, height: 40, status: status())
+        #expect(text.contains("CPU 31%"))
+        #expect(text.contains("3.1 of 10 cores busy"))
+        #expect(text.contains("43 threads queued"))
     }
 
     @Test("The orphan summary is what would be reclaimed, in resources")
@@ -331,6 +334,6 @@ struct LiveFrameTests {
                           width: 40)
             .split(separator: "\n", omittingEmptySubsequences: false)
         #expect(lines.allSatisfy { $0.count <= 40 })
-        #expect(lines.contains { $0.contains("43.1") })
+        #expect(lines.contains { $0.contains("CPU") })
     }
 }

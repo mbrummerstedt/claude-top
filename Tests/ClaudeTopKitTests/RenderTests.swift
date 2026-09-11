@@ -32,20 +32,60 @@ struct RenderTests {
 
     // MARK: - text
 
-    @Test("The header shows load, cores, oversubscription and memory")
+    @Test("The headline is CPU, in the units Activity Monitor uses")
     func header() {
-        let text = Renderer.text(snapshot([]))
-        #expect(text.contains("load 55.6"))
-        #expect(text.contains("10 cores"))
-        #expect(text.contains("5.6x oversubscribed"))
-        #expect(text.contains("10.0/16.0 GB"))
+        // Load average is not a headline. It counts threads waiting rather than work
+        // being done, nothing else on a Mac shows it, and beside a row reading 115% it
+        // invites comparing two different denominators.
+        let text = Renderer.text(Snapshot(machine: machine(), groups: [],
+                                          systemCPU: SystemCPU(userPercent: 20,
+                                                               systemPercent: 11)))
+        #expect(text.contains("CPU 31%"))
+        #expect(text.contains("3.1 of 10 cores busy"))
+        #expect(text.contains("10.0 / 16.0 GB"))
     }
 
-    @Test("A machine that is not oversubscribed does not say it is")
+    @Test("A queue longer than the core count is explained in threads")
+    func queueIsExplained() {
+        // "load 55.6" means nothing to most people. "56 threads queued for 10 cores"
+        // means exactly one thing.
+        let text = Renderer.text(Snapshot(machine: machine(load: 55.6), groups: [],
+                                          systemCPU: SystemCPU(userPercent: 20,
+                                                               systemPercent: 11)))
+        #expect(text.contains("56 threads queued"))
+        #expect(text.contains("10 cores"))
+    }
+
+    @Test("A machine keeping up says nothing about queues")
     func healthyHeader() {
-        let text = Renderer.text(snapshot([], machine: machine(load: 4.2)))
-        #expect(text.contains("load 4.2"))
-        #expect(!text.contains("oversubscribed"))
+        let text = Renderer.text(Snapshot(machine: machine(load: 4.2), groups: [],
+                                          systemCPU: SystemCPU(userPercent: 5,
+                                                               systemPercent: 2)))
+        #expect(!text.contains("queued"))
+        #expect(text.contains("CPU 7%"))
+    }
+
+    @Test("The share it cannot see is stated, not left as a discrepancy")
+    func statesTheGap() {
+        // The reason the numbers read as untrustworthy: macOS hides a third of a Mac from
+        // this tool, and on a busy machine that third holds kernel_task and WindowServer.
+        let seen = AttributionGroup(key: .system(family: .other), label: "Other processes",
+                                    tier: .unresolved, cpuPercent: 172, rssBytes: 0,
+                                    pids: (0..<400).map { Int32(100 + $0) }, containerIDs: [])
+        let text = Renderer.text(Snapshot(
+            machine: MachineInfo(cpuCount: 10, memTotalBytes: 17_179_869_184,
+                                 memUsedBytes: 10_737_418_240, loadAverage1: 10,
+                                 capturedAt: Date(), homeDirectory: "/Users/USER",
+                                 processCount: 612),
+            groups: [seen],
+            systemCPU: SystemCPU(userPercent: 20.7, systemPercent: 10.7)))
+        #expect(text.contains("1.7 of those cores"))
+        #expect(text.contains("212 processes"))
+    }
+
+    @Test("With no reading of the machine the headline says unknown, not zero")
+    func noSystemReading() {
+        #expect(Renderer.text(snapshot([])).contains("CPU —"))
     }
 
     @Test("Sessions, orphans and everything else each get their own block")

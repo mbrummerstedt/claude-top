@@ -149,14 +149,18 @@ public struct MachineInfo: Sendable {
     /// anyway. It is recorded so the output can say what it did not see instead of
     /// implying the breakdown is complete.
     public let processCount: Int
+    /// The kernel's CPU counters at capture time, for diffing against the next reading.
+    public let cpuTicks: CPUTicks?
 
     public init(cpuCount: Int, memTotalBytes: UInt64, memUsedBytes: UInt64 = 0,
                 loadAverage1: Double, capturedAt: Date,
-                homeDirectory: String = NSHomeDirectory(), processCount: Int = 0) {
+                homeDirectory: String = NSHomeDirectory(), processCount: Int = 0,
+                cpuTicks: CPUTicks? = nil) {
         self.cpuCount = cpuCount; self.memTotalBytes = memTotalBytes
         self.memUsedBytes = memUsedBytes
         self.loadAverage1 = loadAverage1; self.capturedAt = capturedAt
         self.homeDirectory = homeDirectory; self.processCount = processCount
+        self.cpuTicks = cpuTicks
     }
 
     public var oversubscription: Double {
@@ -268,11 +272,49 @@ public struct Snapshot: Sendable {
     /// because a container is not a process: its figures come from Docker and describe
     /// the inside of a virtual machine, not this Mac's cores.
     public let containerGroups: [ContainerGroup]
+    /// What the whole machine was doing, from the kernel's own counters. Present only
+    /// when two readings were available to diff.
+    public let systemCPU: SystemCPU?
 
     public init(machine: MachineInfo, groups: [AttributionGroup],
-                containerGroups: [ContainerGroup] = []) {
+                containerGroups: [ContainerGroup] = [], systemCPU: SystemCPU? = nil) {
         self.machine = machine; self.groups = groups
-        self.containerGroups = containerGroups
+        self.containerGroups = containerGroups; self.systemCPU = systemCPU
+    }
+
+    /// Everything this tool could place, in per-core units.
+    public var attributedCPUPercent: Double {
+        groups.reduce(0) { $0 + ($1.cpuPercent ?? 0) }
+    }
+
+    /// The share of the machine's work that happened in processes this user may not
+    /// inspect: the kernel, the window server, other users' daemons.
+    ///
+    /// Stated rather than left as a discrepancy for someone to find. On a busy Mac it is
+    /// large, and a tool showing the smaller number without explaining it reads as wrong
+    /// even when every figure in it is right.
+    /// Cores doing work, from the kernel's own counters. The figure Activity Monitor
+    /// puts at the bottom of its window, expressed as cores rather than as a percentage
+    /// of the whole machine, because "3.9 of 10 cores" needs no conversion in your head.
+    public var busyCores: Double? {
+        systemCPU.map { $0.busyPercent / 100 * Double(machine.cpuCount) }
+    }
+
+    /// Cores this tool could actually account for. Below `busyCores` by whatever is
+    /// happening in processes it may not inspect.
+    public var visibleCores: Double { attributedCPUPercent / 100 }
+
+    /// Threads runnable or waiting on the kernel, averaged over a minute. Above the core
+    /// count it is the queue everything is stuck in, and it is the reason a machine can
+    /// feel unusable while the CPU chart looks calm.
+    public var queuedThreads: Double { machine.loadAverage1 }
+
+    public var unaccountedCPUPercent: Double? {
+        guard let systemCPU else { return nil }
+        // The two are sampled over slightly different windows, so attribution can edge
+        // past the machine total. A negative gap would be nonsense on screen.
+        return max(0, systemCPU.busyPerCore(cpuCount: machine.cpuCount)
+                      - attributedCPUPercent)
     }
 
     public var sessions: [AttributionGroup] {

@@ -8,7 +8,10 @@ the one holding 291% CPU through nine vitest workers, or that a worktree you aba
 yesterday still has a vite watcher and a Postgres container running.
 
 ```
-load 55.6 (10 cores, 5.6x oversubscribed)   mem 10.0/16.0 GB
+CPU 67%   6.7 of 10 cores busy
+memory 12.2 / 16.0 GB
+21 threads queued for 10 cores, so everything waits
+this sees 4.7 of those cores; 2.1 are in 220 processes macOS will not let it read
 
 CLAUDE SESSIONS                                         CPU     RAM  PROC  DOCKER
   reader-app::terms-page                                291%    281M     7       0
@@ -73,8 +76,14 @@ Requires macOS 14 or later. No dependencies beyond the system frameworks.
 git clone https://github.com/mbrummerstedt/claude-top
 cd claude-top
 swift build -c release
-cp .build/release/claude-top /usr/local/bin/
+cp .build/release/claude-top /usr/local/bin/.claude-top.new
+mv -f /usr/local/bin/.claude-top.new /usr/local/bin/claude-top
 ```
+
+The two-step install is not fussiness. Overwriting a signed binary in place on Apple
+Silicon leaves the kernel holding a signature for content that is no longer there, and
+every later launch is killed outright while `codesign -v` still reports the file as valid.
+Replacing the directory entry avoids it.
 
 Optionally install the sampler so history accumulates and the statusline has something to
 read. It runs for a fraction of a second every 15 seconds and keeps a rolling 24 hours.
@@ -174,9 +183,14 @@ already does well and is a different axis. Cross-machine aggregation. Worktree l
 management. Hard limits through cgroups.
 
 It also cannot see processes you do not own. macOS grants task info only for your own
-processes, so roughly a third of a Mac's process table is invisible here. Claude spawns
-nothing as root and a session could not stop a root daemon anyway, so nothing useful is
-lost, but the output tells you the count rather than quietly leaving a gap.
+processes, so roughly a third of a Mac's process table is invisible here, and on a busy
+machine that third holds `kernel_task` and `WindowServer` near the top of the list. Claude
+spawns nothing as root and a session could not stop a root daemon anyway, so nothing
+actionable is lost.
+
+What would be lost is your trust in the numbers, so the gap is stated rather than left for
+you to find: the header reads the same host counters Activity Monitor reads, and says how
+many of the busy cores it could account for and how many it could not.
 
 ## Privacy
 

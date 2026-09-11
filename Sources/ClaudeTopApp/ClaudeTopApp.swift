@@ -18,7 +18,9 @@ struct ClaudeTopApp: App {
             // Short by necessity: the menu bar is shared with everything else. The
             // oversubscription ratio says more per character than a raw load does,
             // because it already accounts for how many cores this machine has.
-            Text(model.menuBarTitle).monospacedDigit()
+            Text(model.menuBarTitle)
+                .monospacedDigit()
+                .foregroundStyle(model.menuBarSeverity)
         }
         .menuBarExtraStyle(.window)
     }
@@ -67,11 +69,23 @@ final class ResourceModel: ObservableObject {
     private var previousAt = Date()
     let interval: TimeInterval = 15
 
+    /// The number Activity Monitor puts at the bottom of its window. A load average in
+    /// the menu bar says nothing a developer can act on, and beside a row reading 115% it
+    /// invites comparing two different denominators.
     var menuBarTitle: String {
-        guard let machine = snapshot?.machine else { return "—" }
-        let ratio = machine.oversubscription
-        return ratio > 1 ? String(format: "%.1fx", ratio)
-                         : String(format: "%.1f", machine.loadAverage1)
+        guard let cpu = snapshot?.systemCPU else { return "—" }
+        return "\(Int(cpu.busyPercent.rounded()))%"
+    }
+
+    /// Amber once the machine is more than half committed, red when it is nearly full or
+    /// the queue is longer than the core count.
+    var menuBarSeverity: Color {
+        guard let snapshot, let cpu = snapshot.systemCPU else { return .secondary }
+        if cpu.busyPercent > 85 || snapshot.queuedThreads > Double(snapshot.machine.cpuCount) * 2 {
+            return .red
+        }
+        if cpu.busyPercent > 55 { return .orange }
+        return .primary
     }
 
     func start() {
@@ -143,7 +157,7 @@ final class ResourceModel: ObservableObject {
     /// Everything is re-read rather than reused from the last tick. Acting on a list
     /// fifteen seconds old means a session started since then looks abandoned, and a pid
     /// recycled since then points at something else entirely.
-    func prepareReap() async {
+    func prepareReap(only key: AttributionKey? = nil) async {
         state = .checking
         guard let (snapshot, sample, _) = await collect() else {
             state = .refused("Could not read the machine just now. Nothing was stopped.")
@@ -160,7 +174,9 @@ final class ResourceModel: ObservableObject {
         }
 
         let keep = Reaper.keepMarkedWorktrees(in: sample)
-        let proposals: [ReapProposal] = snapshot.orphans.compactMap { group in
+        let candidates = key.map { wanted in snapshot.orphans.filter { $0.key == wanted } }
+            ?? snapshot.orphans
+        let proposals: [ReapProposal] = candidates.compactMap { group in
             let plan = AttributionEngine.reapPlan(
                 for: group.key, processes: sample.processes,
                 environments: sample.environments, containers: sample.containers,
@@ -211,7 +227,7 @@ struct Overview: View {
 
     var body: some View {
         if let snapshot = model.snapshot {
-            MachineHeader(machine: snapshot.machine)
+            MachineHeader(snapshot: snapshot)
 
             if case .cached(let age) = model.rosterSource {
                 Note("Session list is \(Int(age))s old. Stopping is disabled until it refreshes.")
@@ -219,25 +235,21 @@ struct Overview: View {
                 Note("Session list unavailable. Rows below may be live sessions.")
             }
 
+            // Abandoned work comes first. It is the only thing on this panel you can act
+            // on without costing anybody their session, which makes it the reason to open
+            // the panel at all.
+            if !snapshot.orphans.isEmpty {
+                Divider()
+                Abandoned(snapshot: snapshot, model: model)
+            }
+
             Divider()
             Block("Sessions", snapshot.sessions, asOf: snapshot.machine.capturedAt)
-            Block(model.rosterSource == .unavailable ? "Unidentified" : "Orphaned",
-                  snapshot.orphans, asOf: snapshot.machine.capturedAt, showAge: true)
             Block("Everything else", snapshot.everythingElse,
                   asOf: snapshot.machine.capturedAt)
 
             if !snapshot.containerGroups.isEmpty {
                 DockerBlock(groups: snapshot.containerGroups)
-            }
-
-            if reclaimable(snapshot) > 0, model.rosterSource == .live {
-                Divider()
-                Button {
-                    Task { await model.prepareReap() }
-                } label: {
-                    Label("Stop \(reclaimable(snapshot)) abandoned processes…",
-                          systemImage: "stop.circle")
-                }
             }
         } else {
             Text("Taking the first reading…")
@@ -249,34 +261,129 @@ struct Overview: View {
         Divider()
         Footer(model: model)
     }
+}
 
-    private func reclaimable(_ snapshot: Snapshot) -> Int {
-        snapshot.orphans.reduce(0) { $0 + $1.pids.count }
+/// Worktrees whose session has exited, and what they are still holding.
+struct Abandoned: View {
+    let snapshot: Snapshot
+    @ObservedObject var model: ResourceModel
+
+    private var processes: Int { snapshot.orphans.reduce(0) { $0 + $1.pids.count } }
+    private var containers: Int { snapshot.orphans.reduce(0) { $0 + $1.containerIDs.count } }
+    private var memory: UInt64 { snapshot.orphans.reduce(0) { $0 + $1.rssBytes } }
+    private var canStop: Bool { model.rosterSource == .live }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("ABANDONED").font(.caption2.bold()).foregroundStyle(.secondary)
+                Text("no session is using these")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                Spacer()
+                Text("\(processes)p · \(Renderer.formatBytes(memory))"
+                     + (containers > 0 ? " · \(containers)c" : ""))
+                    .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+            }
+
+            // Oldest first. How long something has sat untouched is the strongest
+            // argument for stopping it, stronger than any resource figure.
+            ForEach(byAge, id: \.key) { group in
+                AbandonedRow(group: group, snapshot: snapshot, canStop: canStop) {
+                    Task { await model.prepareReap(only: group.key) }
+                }
+            }
+
+            if canStop, snapshot.orphans.count > 1 {
+                Button {
+                    Task { await model.prepareReap() }
+                } label: {
+                    Text("Stop all \(processes) processes"
+                         + (containers > 0 ? " and \(containers) containers" : "") + "…")
+                }
+                .controlSize(.small)
+            }
+        }
+    }
+
+    private var byAge: [AttributionGroup] {
+        snapshot.orphans.sorted {
+            ($0.oldestProcessStartedAt ?? .distantFuture)
+                < ($1.oldestProcessStartedAt ?? .distantFuture)
+        }
+    }
+}
+
+struct AbandonedRow: View {
+    let group: AttributionGroup
+    let snapshot: Snapshot
+    let canStop: Bool
+    let stop: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 6) {
+                Text(group.label).lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 6)
+                if let started = group.oldestProcessStartedAt {
+                    Text(Renderer.formatDuration(
+                        snapshot.machine.capturedAt.timeIntervalSince(started)))
+                        .foregroundStyle(.orange)
+                }
+                Text(holdings).monospacedDigit().foregroundStyle(.secondary)
+                    .frame(width: 96, alignment: .trailing)
+                if canStop {
+                    Button("Stop", action: stop)
+                        .controlSize(.mini)
+                        .opacity(hovering ? 1 : 0.55)
+                }
+            }
+            .font(.caption)
+
+            // What it is, so stopping it is a decision rather than a leap. A worktree
+            // holding a Postgres and four uvicorn workers is a different thing from one
+            // holding a stalled shell.
+            if let kinds = detail {
+                Text("    \(kinds)").font(.caption2).foregroundStyle(.tertiary)
+            }
+        }
+        .onHover { hovering = $0 }
+    }
+
+    private var holdings: String {
+        var parts: [String] = []
+        if !group.pids.isEmpty { parts.append("\(group.pids.count)p") }
+        if !group.containerIDs.isEmpty { parts.append("\(group.containerIDs.count)c") }
+        if group.rssBytes > 0 { parts.append(Renderer.formatBytes(group.rssBytes)) }
+        return parts.joined(separator: " · ")
+    }
+
+    private var detail: String? {
+        let kinds = group.breakdown.prefix(3).map {
+            $0.count > 1 ? "\($0.count)x \($0.name)" : $0.name
+        }
+        if kinds.isEmpty { return group.containerIDs.isEmpty ? nil : "containers only" }
+        return kinds.joined(separator: ", ")
     }
 }
 
 struct MachineHeader: View {
-    let machine: MachineInfo
+    let snapshot: Snapshot
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(String(format: "load %.1f", machine.loadAverage1))
-                    .font(.title2.monospacedDigit())
-                Text("across \(machine.cpuCount) cores").foregroundStyle(.secondary)
-                if machine.oversubscription > 1 {
-                    Text(String(format: "%.1fx", machine.oversubscription))
-                        .font(.caption.bold())
-                        .padding(.horizontal, 5).padding(.vertical, 1)
-                        .background(severity(machine.oversubscription).opacity(0.2),
-                                    in: Capsule())
-                        .foregroundStyle(severity(machine.oversubscription))
-                }
+            // The same lines the CLI prints, from one implementation, so the two cannot
+            // drift into disagreeing about the machine.
+            let lines = Renderer.headlines(snapshot)
+            if let first = lines.first {
+                Text(first).font(.title3.monospacedDigit())
             }
-            Text(String(format: "memory %.1f of %.1f GB",
-                        Double(machine.memUsedBytes) / 1_073_741_824,
-                        Double(machine.memTotalBytes) / 1_073_741_824))
-                .font(.caption).foregroundStyle(.secondary)
+            ForEach(Array(lines.dropFirst().enumerated()), id: \.offset) { index, line in
+                Text(line)
+                    .font(.caption)
+                    .foregroundStyle(index == 0 ? .secondary : .tertiary)
+            }
         }
     }
 }

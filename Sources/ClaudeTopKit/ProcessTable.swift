@@ -96,7 +96,8 @@ public enum MachineProbe {
             loadAverage1: load,
             capturedAt: capturedAt,
             homeDirectory: NSHomeDirectory(),
-            processCount: processCount)
+            processCount: processCount,
+            cpuTicks: cpuTicks())
     }
 
     /// Active, wired and compressed pages. Not free memory: macOS keeps very little of
