@@ -54,6 +54,56 @@ struct ReapSafetyTests {
             keepMarkedWorktrees: keep)
     }
 
+    // MARK: - never itself
+
+    /// Found live. The menu bar app was launched from inside a Claude Code session, so it
+    /// inherited that session's `CLAUDE_CODE_MESSAGING_SOCKET` the way every child does.
+    /// When the session ended, the app became a stamped leftover of a dead worktree:
+    /// `tier=envStamp, reapable=true`. The live view offered to stop it, and `--auto-reap`
+    /// runs unattended on a LaunchAgent, so after the quarantine it would have killed the
+    /// tool's own menu bar app with nobody watching. Recovery is Spotlight or the next
+    /// login, neither of which anyone would think to look for.
+    ///
+    /// Selection is by env stamp precisely so it cannot reach sideways, and that is still
+    /// right. The stamp is simply not evidence about this one process, because this
+    /// process is the thing doing the reaping.
+    @Test("The reaper never selects claude-top's own machinery")
+    func neverReapsItself() {
+        let sessions = [session(100, worktreeA, uuid: "uuid-a")]
+        let processes = [
+            proc(100),
+            proc(500, ppid: 100, cmd: "/usr/bin/node"),
+            proc(501, ppid: 100, cmd: "/Applications/ClaudeTop.app/Contents/MacOS/ClaudeTop"),
+            proc(502, ppid: 100, cmd: "/usr/local/bin/claude-top --watch"),
+            proc(503, ppid: 100, cmd: "/usr/local/bin/claude-top --sample"),
+        ]
+        let environments = [env(500, session: 100), env(501, session: 100),
+                            env(502, session: 100), env(503, session: 100)]
+
+        let selected = Set(plan(for: .session(uuid: "uuid-a"), processes: processes,
+                                environments: environments,
+                                sessions: sessions).processes.map(\.pid))
+        #expect(selected == [500], "only the unrelated worker is eligible")
+    }
+
+    @Test("A binary merely named like it elsewhere is still eligible")
+    func doesNotOverreachOnTheName() {
+        // The exemption is for this tool, not for any path with the word in it. A
+        // worktree called claude-top, or a file named claude-top-notes.js, is ordinary
+        // work and stopping it is the whole point of the tool.
+        let sessions = [session(100, worktreeA, uuid: "uuid-a")]
+        let processes = [
+            proc(500, ppid: 100, cmd: "node /Users/USER/git_repositories/claude-top/scripts/build.js"),
+            proc(501, ppid: 100, cmd: "/usr/bin/vim claude-top-notes.md"),
+        ]
+        let environments = [env(500, session: 100), env(501, session: 100)]
+
+        let selected = Set(plan(for: .session(uuid: "uuid-a"), processes: processes,
+                                environments: environments,
+                                sessions: sessions).processes.map(\.pid))
+        #expect(selected == [500, 501])
+    }
+
     // MARK: - the one that matters
 
     @Test("Reaping one session selects nothing belonging to another live session")

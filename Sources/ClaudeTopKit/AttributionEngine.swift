@@ -485,6 +485,7 @@ public enum AttributionEngine {
             guard let placed = attribution[proc.pid],
                   placed.key == target,
                   placed.tier == .envStamp,
+                  !isOwnMachinery(proc.command),
                   let spawner = environments[proc.pid]?.spawningSessionPID
             else { continue }
             processTargets.append(ReapTarget(
@@ -620,6 +621,27 @@ public enum AttributionEngine {
             out[proc.pid] = consumed > 0 ? (consumed / over) * 100 : 0
         }
         return out
+    }
+
+    /// Whether a process is this tool: the CLI, the sampler, or the menu bar app.
+    ///
+    /// The env stamp is inherited by every child, so a `claude-top` or a `ClaudeTop.app`
+    /// started from inside a Claude Code session carries that session's socket for as long
+    /// as it runs. When the session ends it becomes a stamped leftover of a dead worktree
+    /// and selects exactly like any other, which means the reaper offers to stop the thing
+    /// doing the reaping, and `--auto-reap` does it unattended with nobody watching.
+    ///
+    /// Matched on the executable, never on the command line containing the word. A
+    /// worktree named claude-top and a file named claude-top-notes.md are ordinary work
+    /// and stopping them is what this is for.
+    static func isOwnMachinery(_ command: String) -> Bool {
+        // argv joined, so the executable is the first field. A path with a space in it
+        // would split wrong here; the bundle check below is what catches the app either
+        // way, and no install of the CLI puts a space in its path.
+        let executable = command.split(separator: " ", maxSplits: 1).first.map(String.init)
+            ?? command
+        return executable.hasSuffix("/claude-top") || executable == "claude-top"
+            || command.contains("ClaudeTop.app/Contents/MacOS/")
     }
 
     /// Same PID plus same start time. The start time is what distinguishes a long-lived
