@@ -197,6 +197,11 @@ if flag("--statusline") {
 if flag("--sample") {
     // One tick, then exit. A short-lived process rather than a resident daemon: nothing
     // sits in RAM between ticks and a crash self-heals on the next one.
+    // The app samples in-process while it is open. Two writers would interleave two
+    // different CPU baselines into one table, which yields nonsense percentages rather
+    // than merely duplicate rows.
+    if SamplerCoordinator.shouldYieldNow() { exit(0) }
+
     guard let store = openStore() else { fail("cannot open \(ResourceStore.defaultPath)") }
 
     let sample = Sampler.collect()

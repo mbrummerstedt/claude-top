@@ -544,7 +544,7 @@ extension Renderer {
     /// Only for groups heavy enough to be worth acting on: half a core is the same
     /// threshold the store uses to decide a group is worth keeping detail for. A group
     /// running one of everything gets nothing, because the row already said that.
-    static func detailRows(for group: AttributionGroup, limit: Int) -> [ProcessKind] {
+    public static func detailRows(for group: AttributionGroup, limit: Int) -> [ProcessKind] {
         guard (group.cpuPercent ?? 0) >= 50,
               group.breakdown.contains(where: { $0.count > 1 }) || group.breakdown.count > 1
         else { return [] }
