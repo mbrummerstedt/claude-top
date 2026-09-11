@@ -63,11 +63,19 @@ final class ResourceModel: ObservableObject {
     @Published private(set) var rosterSource: Roster.Source = .unavailable
     @Published private(set) var ownCPUPercent: Double?
     @Published var state: PanelState = .overview
+    /// Rows currently being stopped. Shown as a spinner where that row's button was,
+    /// rather than by replacing the panel: a view that changes under you loses your place
+    /// and hides everything else you were reading.
+    @Published private(set) var stopping: Set<AttributionKey> = []
+    @Published private(set) var lastOutcome: (key: AttributionKey, survived: [Int32])?
 
     private var ticker: Task<Void, Never>?
     private let collector = IncrementalCollector()
     private var previous: [ProcessSample] = []
     private var previousAt = Date()
+    /// The kernel's CPU counters from the last tick. Without them the header can only say
+    /// "CPU —", which is what it was doing.
+    private var previousTicks: CPUTicks?
     let interval: TimeInterval = 15
 
     /// The number Activity Monitor puts at the bottom of its window. A load average in
@@ -167,6 +175,7 @@ final class ResourceModel: ObservableObject {
     private func collect() async -> (Snapshot, RawSample, [Int32: Double])? {
         let baseline = previous
         let baselineAt = previousAt
+        let baselineTicks = previousTicks
         let collector = self.collector
 
         let result = await Task.detached(priority: .utility) {
@@ -177,12 +186,14 @@ final class ResourceModel: ObservableObject {
             let cpu = AttributionEngine.cpuPercents(
                 earlier: baseline, earlierAt: baselineAt,
                 later: sample.processes, laterAt: sample.processesReadAt)
-            return (Sampler.attribute(sample, cpuPercents: cpu), sample, cpu)
+            return (Sampler.attribute(sample, cpuPercents: cpu,
+                                      previousTicks: baselineTicks), sample, cpu)
         }.value
 
         if let result {
             previous = result.1.processes
             previousAt = result.1.processesReadAt
+            previousTicks = result.1.machine.cpuTicks
         }
         return result
     }
@@ -225,6 +236,43 @@ final class ResourceModel: ObservableObject {
                                 })
         }
         state = .confirming(proposals)
+    }
+
+    /// Stop one worktree without leaving the panel.
+    ///
+    /// No confirmation screen: the row already names the worktree, how long it has been
+    /// abandoned, what it is holding and what it is made of, so the scope is on screen and
+    /// unambiguous before the button is pressed. The bulk action keeps its confirmation,
+    /// because there the scope is not all visible at once.
+    ///
+    /// Everything is still re-read at the moment of the press, and the roster must be one
+    /// read just now, exactly as the confirmed paths require.
+    func stopOne(_ key: AttributionKey) async {
+        guard !stopping.contains(key) else { return }
+        stopping.insert(key)
+        defer { stopping.remove(key) }
+
+        guard let (snapshot, sample, _) = await collect(), sample.roster.allowsReaping else {
+            state = .refused("The session list could not be read just now, so every live "
+                             + "session would look abandoned. Nothing was stopped.")
+            return
+        }
+        guard let group = snapshot.orphans.first(where: { $0.key == key }) else { return }
+
+        let plan = AttributionEngine.reapPlan(
+            for: group.key, processes: sample.processes, environments: sample.environments,
+            containers: sample.containers, roster: sample.roster,
+            keepMarkedWorktrees: Reaper.keepMarkedWorktrees(in: sample))
+        guard !plan.isEmpty else { return }
+
+        let outcome = await Task.detached(priority: .userInitiated) {
+            Reaper().execute(plan)
+        }.value
+
+        // Only worth surfacing when something refused to go. A success needs no notice:
+        // the row disappears on the next tick, which is the notice.
+        lastOutcome = outcome.survived.isEmpty ? nil : (key, outcome.survived)
+        await tick()
     }
 
     /// Acts on exactly the plans that were shown, never on a fresh reading. Nothing may
@@ -280,6 +328,16 @@ struct Overview: View {
                 Abandoned(snapshot: snapshot, model: model)
             }
 
+            if let outcome = model.lastOutcome {
+                // Only shown when something refused both signals. A success needs no
+                // notice: the row disappearing is the notice.
+                Text("\(outcome.survived.count) process"
+                     + (outcome.survived.count == 1 ? "" : "es")
+                     + " survived both signals: "
+                     + outcome.survived.map(String.init).joined(separator: ", "))
+                    .font(.caption2).foregroundStyle(.orange)
+            }
+
             Divider()
             Block("Sessions", snapshot.sessions, asOf: snapshot.machine.capturedAt)
             Block("Everything else", snapshot.everythingElse,
@@ -309,6 +367,7 @@ struct Abandoned: View {
     private var containers: Int { snapshot.orphans.reduce(0) { $0 + $1.containerIDs.count } }
     private var memory: UInt64 { snapshot.orphans.reduce(0) { $0 + $1.rssBytes } }
     private var canStop: Bool { model.rosterSource == .live }
+    private let rowLimit = 8
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -324,10 +383,20 @@ struct Abandoned: View {
 
             // Oldest first. How long something has sat untouched is the strongest
             // argument for stopping it, stronger than any resource figure.
-            ForEach(byAge, id: \.key) { group in
-                AbandonedRow(group: group, snapshot: snapshot, canStop: canStop) {
-                    Task { await model.prepareReap(only: group.key) }
+            //
+            // Capped, because this list is not naturally short: a repository worked in
+            // many worktrees leaves one row per worktree, and fourteen of them push the
+            // rest of the panel off the screen. The ones that matter most are at the top
+            // by definition, and the total above and the button below both cover the rest.
+            ForEach(byAge.prefix(rowLimit), id: \.key) { group in
+                AbandonedRow(group: group, snapshot: snapshot, canStop: canStop,
+                             isStopping: model.stopping.contains(group.key)) {
+                    Task { await model.stopOne(group.key) }
                 }
+            }
+            if byAge.count > rowLimit {
+                Text("and \(byAge.count - rowLimit) more, counted above")
+                    .font(.caption2).foregroundStyle(.tertiary)
             }
 
             if canStop, snapshot.orphans.count > 1 {
@@ -354,6 +423,7 @@ struct AbandonedRow: View {
     let group: AttributionGroup
     let snapshot: Snapshot
     let canStop: Bool
+    let isStopping: Bool
     let stop: () -> Void
 
     @State private var hovering = false
@@ -370,10 +440,15 @@ struct AbandonedRow: View {
                 }
                 Text(holdings).monospacedDigit().foregroundStyle(.secondary)
                     .frame(width: 96, alignment: .trailing)
-                if canStop {
+                if isStopping {
+                    // In place of the button, so nothing moves and nothing else is hidden.
+                    ProgressView().controlSize(.small).scaleEffect(0.6)
+                        .frame(width: 38)
+                } else if canStop {
                     Button("Stop", action: stop)
                         .controlSize(.mini)
                         .opacity(hovering ? 1 : 0.55)
+                        .frame(width: 38)
                 }
             }
             .font(.caption)

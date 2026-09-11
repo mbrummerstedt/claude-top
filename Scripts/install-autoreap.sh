@@ -14,6 +14,10 @@
 # Touches exactly one file: ~/Library/LaunchAgents/com.claudetop.autoreap.plist
 set -euo pipefail
 
+# Commands are called by absolute path where a shadowed one would hang. An exported
+# shell function is inherited by a script, so a `cat` wrapped around a pager turns a
+# heredoc into a process waiting on a terminal that is not there.
+
 LABEL="com.claudetop.autoreap"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 BINARY="${1:-/usr/local/bin/claude-top}"
@@ -28,7 +32,7 @@ fi
 # Ten minutes, not thirty. The quarantine clock only advances while something is watching,
 # and a gap longer than half an hour restarts it, so the job that reads the clock has to
 # run often enough to keep it. Each run is a fraction of a second.
-cat > "$PLIST" <<PLIST_END
+/bin/cat > "$PLIST" <<PLIST_END
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
