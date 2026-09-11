@@ -9,6 +9,10 @@
 # it is touched; drag the result to /Applications yourself if you want it there.
 set -euo pipefail
 
+# Commands are called by absolute path where a shadowed one would hang. An exported
+# shell function is inherited by a script, so a `cat` wrapped around a pager turns a
+# heredoc into a process waiting on a terminal that is not there.
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIGURATION="${1:-release}"
 APP="$ROOT/build/ClaudeTop.app"
@@ -30,7 +34,7 @@ esac
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BINARY" "$APP/Contents/MacOS/ClaudeTop"
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+/bin/cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

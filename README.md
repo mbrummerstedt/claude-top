@@ -158,6 +158,12 @@ else. A toggle at the bottom starts it with the machine, registered through
 `SMAppService` so it appears in System Settings under Login Items and can be revoked
 there.
 
+Stopping one worktree happens in place: a spinner appears where that row's button was and
+the panel does not change. The row already names the worktree, how long it has been
+abandoned, what it is holding and what it is made of, so the scope is on screen before the
+button is pressed. Stopping everything keeps its confirmation, because there the scope is
+not all visible at once.
+
 While the app is running it owns sampling and the LaunchAgent stands down, so there is
 never a second writer.
 

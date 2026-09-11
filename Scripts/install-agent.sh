@@ -8,6 +8,10 @@
 # Touches exactly one file: ~/Library/LaunchAgents/com.claudetop.sampler.plist.
 set -euo pipefail
 
+# Commands are called by absolute path where a shadowed one would hang. An exported
+# shell function is inherited by a script, so a `cat` wrapped around a pager turns a
+# heredoc into a process waiting on a terminal that is not there.
+
 LABEL="com.claudetop.sampler"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 BINARY="${1:-$(cd "$(dirname "$0")/.." && pwd)/.build/release/claude-top}"
@@ -23,7 +27,7 @@ fi
 # shell's PATH, and a machine with version managers early in that PATH would resolve a
 # different binary, or none at all.
 mkdir -p "$HOME/Library/LaunchAgents"
-cat > "$PLIST" <<PLIST_END
+/bin/cat > "$PLIST" <<PLIST_END
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
