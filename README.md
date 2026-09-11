@@ -158,8 +158,11 @@ else. A toggle at the bottom starts it with the machine, registered through
 `SMAppService` so it appears in System Settings under Login Items and can be revoked
 there.
 
-Stopping one worktree happens in place: a spinner appears where that row's button was and
-the panel does not change. The row already names the worktree, how long it has been
+Stopping happens in place: a spinner appears where that row's button was and the panel
+does not change. Several can be asked for at once, each showing its spinner from the click
+rather than from its turn; they are carried out one at a time behind the panel, because
+each stop signals a set of processes and waits five seconds for them to go, and a machine
+that needs this is not one to run several of those on at once. The row already names the worktree, how long it has been
 abandoned, what it is holding and what it is made of, so the scope is on screen before the
 button is pressed. Stopping everything keeps its confirmation, because there the scope is
 not all visible at once.

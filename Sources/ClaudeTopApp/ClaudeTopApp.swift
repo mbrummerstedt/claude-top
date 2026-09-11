@@ -67,7 +67,12 @@ final class ResourceModel: ObservableObject {
     /// rather than by replacing the panel: a view that changes under you loses your place
     /// and hides everything else you were reading.
     @Published private(set) var stopping: Set<AttributionKey> = []
-    @Published private(set) var lastOutcome: (key: AttributionKey, survived: [Int32])?
+    @Published private(set) var lastSurvivors: [Int32] = []
+    /// Asked for but not yet reached. Separate from `stopping` only in that `stopping` is
+    /// what the rows read, and a row shows a spinner from the click rather than from its
+    /// turn.
+    private var queued: [AttributionKey] = []
+    private var worker: Task<Void, Never>?
 
     private var ticker: Task<Void, Never>?
     private let collector = IncrementalCollector()
@@ -142,11 +147,21 @@ final class ResourceModel: ObservableObject {
 
     @Published var loginItemProblem: String?
 
+    /// The routine sample, which stands aside when the panel is busy.
     private func tick() async {
         // Paused while a confirmation is on screen. A list that changes under the cursor
         // is a list you cannot agree to.
         if case .confirming = state { return }
+        // And while things are being stopped, so a routine sample does not compete with
+        // that work for readings of a machine already struggling.
+        if worker != nil { return }
+        await refresh()
+    }
 
+    /// Read and publish, regardless of what else is happening. The stopping worker calls
+    /// this directly: it is the one thing that should refresh the panel while it is busy,
+    /// since it is what made the rows go away.
+    private func refresh() async {
         let collected = await collect()
         guard let (snapshot, sample, cpu) = collected else { return }
 
@@ -238,52 +253,109 @@ final class ResourceModel: ObservableObject {
         state = .confirming(proposals)
     }
 
-    /// Stop one worktree without leaving the panel.
+    /// Ask for a worktree to be stopped.
+    ///
+    /// Returns immediately. The row shows a spinner from this moment, whether or not its
+    /// turn has come, so several can be asked for in a row without waiting on each other:
+    /// a panel that ignores the second click until the first finishes is a panel that
+    /// looks broken.
     ///
     /// No confirmation screen: the row already names the worktree, how long it has been
     /// abandoned, what it is holding and what it is made of, so the scope is on screen and
     /// unambiguous before the button is pressed. The bulk action keeps its confirmation,
     /// because there the scope is not all visible at once.
-    ///
-    /// Everything is still re-read at the moment of the press, and the roster must be one
-    /// read just now, exactly as the confirmed paths require.
-    func stopOne(_ key: AttributionKey) async {
+    func requestStop(_ key: AttributionKey) {
         guard !stopping.contains(key) else { return }
         stopping.insert(key)
-        defer { stopping.remove(key) }
+        queued.append(key)
+        startWorker()
+    }
 
-        guard let (snapshot, sample, _) = await collect(), sample.roster.allowsReaping else {
-            state = .refused("The session list could not be read just now, so every live "
-                             + "session would look abandoned. Nothing was stopped.")
-            return
+    private func startWorker() {
+        guard worker == nil else { return }
+        worker = Task { [weak self] in
+            await self?.drain()
+            self?.worker = nil
         }
-        guard let group = snapshot.orphans.first(where: { $0.key == key }) else { return }
+    }
 
-        let plan = AttributionEngine.reapPlan(
-            for: group.key, processes: sample.processes, environments: sample.environments,
-            containers: sample.containers, roster: sample.roster,
-            keepMarkedWorktrees: Reaper.keepMarkedWorktrees(in: sample))
-        guard !plan.isEmpty else { return }
+    /// Work through what has been asked for, one worktree at a time.
+    ///
+    /// Sequential on purpose. Each stop signals a set of processes and waits five seconds
+    /// for them to go, and running several of those at once would mean several concurrent
+    /// reads of the machine on a machine that is by definition already struggling.
+    ///
+    /// Taken in passes rather than one at a time: everything queued when a pass starts
+    /// shares a single reading of the machine, and anything asked for during that pass
+    /// waits for the next one and gets a reading of its own. That keeps every plan built
+    /// from something recent without re-reading once per row.
+    private func drain() async {
+        while !queued.isEmpty {
+            let batch = queued
+            queued = []
 
-        let outcome = await Task.detached(priority: .userInitiated) {
-            Reaper().execute(plan)
-        }.value
+            guard let (snapshot, sample, _) = await collect() else {
+                stopping.subtract(batch)
+                state = .refused("Could not read the machine just now. Nothing was stopped.")
+                return
+            }
+            // A cached roster cannot tell "this session exited" from "this session was not
+            // listed", and that difference decides whether live work lands on a kill list.
+            guard sample.roster.allowsReaping else {
+                stopping.subtract(batch)
+                state = .refused("The session list could not be read just now, so every "
+                                 + "live session would look abandoned. Nothing was stopped.")
+                return
+            }
 
-        // Only worth surfacing when something refused to go. A success needs no notice:
-        // the row disappears on the next tick, which is the notice.
-        lastOutcome = outcome.survived.isEmpty ? nil : (key, outcome.survived)
-        await tick()
+            let keep = Reaper.keepMarkedWorktrees(in: sample)
+            var survived: [Int32] = []
+
+            for key in batch {
+                defer { stopping.remove(key) }
+                guard let group = snapshot.orphans.first(where: { $0.key == key }) else {
+                    continue
+                }
+                let plan = AttributionEngine.reapPlan(
+                    for: group.key, processes: sample.processes,
+                    environments: sample.environments, containers: sample.containers,
+                    roster: sample.roster, keepMarkedWorktrees: keep)
+                guard !plan.isEmpty else { continue }
+
+                let outcome = await Task.detached(priority: .userInitiated) {
+                    Reaper().execute(plan)
+                }.value
+                survived += outcome.survived
+            }
+
+            // Only worth surfacing when something refused to go. A success needs no
+            // notice: the row disappearing is the notice.
+            lastSurvivors = survived.isEmpty ? [] : survived
+            await refresh()
+        }
     }
 
     /// Acts on exactly the plans that were shown, never on a fresh reading. Nothing may
     /// join the list after it has been agreed to.
+    /// Acts on exactly the plans that were shown, never on a fresh reading. Nothing may
+    /// join the list after it has been agreed to.
+    ///
+    /// Returns to the panel first and runs behind it, so the rows being stopped show their
+    /// spinners in place rather than the whole view becoming a progress screen.
     func carryOut(_ proposals: [ReapProposal]) async {
-        state = .checking
-        let results = await Task.detached(priority: .userInitiated) {
-            let reaper = Reaper()
-            return proposals.map { (label: $0.label, outcome: reaper.execute($0.plan)) }
-        }.value
-        state = .finished(results)
+        state = .overview
+        stopping.formUnion(proposals.map(\.plan.key))
+
+        var survived: [Int32] = []
+        for proposal in proposals {
+            defer { stopping.remove(proposal.plan.key) }
+            let outcome = await Task.detached(priority: .userInitiated) {
+                Reaper().execute(proposal.plan)
+            }.value
+            survived += outcome.survived
+        }
+        lastSurvivors = survived
+        await refresh()
     }
 }
 
@@ -328,13 +400,13 @@ struct Overview: View {
                 Abandoned(snapshot: snapshot, model: model)
             }
 
-            if let outcome = model.lastOutcome {
+            if !model.lastSurvivors.isEmpty {
                 // Only shown when something refused both signals. A success needs no
                 // notice: the row disappearing is the notice.
-                Text("\(outcome.survived.count) process"
-                     + (outcome.survived.count == 1 ? "" : "es")
+                Text("\(model.lastSurvivors.count) process"
+                     + (model.lastSurvivors.count == 1 ? "" : "es")
                      + " survived both signals: "
-                     + outcome.survived.map(String.init).joined(separator: ", "))
+                     + model.lastSurvivors.map(String.init).joined(separator: ", "))
                     .font(.caption2).foregroundStyle(.orange)
             }
 
@@ -391,7 +463,7 @@ struct Abandoned: View {
             ForEach(byAge.prefix(rowLimit), id: \.key) { group in
                 AbandonedRow(group: group, snapshot: snapshot, canStop: canStop,
                              isStopping: model.stopping.contains(group.key)) {
-                    Task { await model.stopOne(group.key) }
+                    model.requestStop(group.key)
                 }
             }
             if byAge.count > rowLimit {
