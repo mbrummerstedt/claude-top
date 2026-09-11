@@ -56,6 +56,7 @@ public enum Sampler {
     public static func snapshot(separatedBy interval: TimeInterval = 0.7) -> Snapshot {
         let baseline = ProcessTable.current()
         let baselineAt = Date()
+        let baselineTicks = MachineProbe.cpuTicks()
 
         Thread.sleep(forTimeInterval: interval)
 
@@ -64,16 +65,29 @@ public enum Sampler {
             earlier: baseline, earlierAt: baselineAt,
             later: sample.processes, laterAt: sample.processesReadAt)
 
-        return attribute(sample, cpuPercents: cpu)
+        return attribute(sample, cpuPercents: cpu, previousTicks: baselineTicks)
     }
 
-    public static func attribute(_ sample: RawSample, cpuPercents: [Int32: Double]) -> Snapshot {
-        AttributionEngine.attribute(
+    /// `previousTicks` are the kernel's CPU counters from the last reading. With them the
+    /// snapshot can state how much of the machine's work happened in processes this user
+    /// may not inspect, which on a busy Mac is most of the difference between this tool's
+    /// numbers and Activity Monitor's.
+    public static func attribute(_ sample: RawSample, cpuPercents: [Int32: Double],
+                                 previousTicks: CPUTicks? = nil) -> Snapshot {
+        let snapshot = AttributionEngine.attribute(
             processes: sample.processes,
             environments: sample.environments,
             containers: sample.containers,
             sessions: sample.sessions,
             cpuPercents: cpuPercents,
             machine: sample.machine)
+
+        guard let previousTicks, let ticks = sample.machine.cpuTicks,
+              let systemCPU = AttributionEngine.systemCPU(earlier: previousTicks,
+                                                          later: ticks)
+        else { return snapshot }
+
+        return Snapshot(machine: snapshot.machine, groups: snapshot.groups,
+                        containerGroups: snapshot.containerGroups, systemCPU: systemCPU)
     }
 }

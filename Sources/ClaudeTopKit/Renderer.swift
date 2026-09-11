@@ -17,7 +17,7 @@ public enum Renderer {
         // Sized to the longest label present rather than fixed, because a worktree name
         // truncated mid-word is the one column a person actually reads.
         let width = min(72, max(40, (snapshot.groups.map { displayLabel($0).count }.max() ?? 0) + 4))
-        var lines: [String] = [header(snapshot.machine), ""]
+        var lines: [String] = headlines(snapshot) + [""]
 
         if snapshot.groups.isEmpty {
             lines.append("nothing attributed — no readable processes or containers")
@@ -97,19 +97,56 @@ public enum Renderer {
         return lines.joined(separator: "\n")
     }
 
-    private static func header(_ machine: MachineInfo) -> String {
-        var load = "load \(String(format: "%.1f", machine.loadAverage1)) (\(machine.cpuCount) cores"
-        if machine.oversubscription > 1.2 {
-            load += ", \(String(format: "%.1f", machine.oversubscription))x oversubscribed"
-        }
-        load += ")"
+    /// The headline, in the units a developer already reads elsewhere.
+    ///
+    /// CPU percent first, because that is the number Activity Monitor shows and the one
+    /// every row below is a share of. Load average is not a headline: it counts threads
+    /// waiting rather than work being done, nothing else on a Mac displays it, and put
+    /// beside a row reading `115%` it invites a comparison between two different
+    /// denominators.
+    public static func headlines(_ snapshot: Snapshot) -> [String] {
+        let machine = snapshot.machine
+        var lines: [String] = []
 
+        let memory = "memory \(String(format: "%.1f", Double(machine.memUsedBytes) / 1_073_741_824))"
+            + " / \(String(format: "%.1f", Double(machine.memTotalBytes) / 1_073_741_824)) GB"
+
+        if let busy = snapshot.busyCores, let cpu = snapshot.systemCPU {
+            lines.append("CPU \(Int(cpu.busyPercent.rounded()))%"
+                         + "   \(String(format: "%.1f", busy)) of \(machine.cpuCount) cores busy")
+            lines.append(memory)
+        } else {
+            // No second reading of the kernel counters yet.
+            lines.append("CPU —   \(machine.cpuCount) cores")
+            lines.append(memory)
+        }
+
+        // Only when it means something. Below the core count the queue is not the story.
+        if machine.loadAverage1 > Double(machine.cpuCount) {
+            lines.append("\(String(format: "%.0f", snapshot.queuedThreads)) threads queued "
+                         + "for \(machine.cpuCount) cores, so everything waits")
+        }
+
+        // The gap, stated. On a busy Mac it is large, and a tool that shows the smaller
+        // number without explaining it reads as wrong even when every figure is right.
+        if let unaccounted = snapshot.unaccountedCPUPercent, unaccounted > 20,
+           snapshot.unreadableProcessCount > 0 {
+            lines.append("this sees \(String(format: "%.1f", snapshot.visibleCores)) of those "
+                         + "cores; \(String(format: "%.1f", unaccounted / 100)) are in "
+                         + "\(snapshot.unreadableProcessCount) processes macOS will not let it read")
+        }
+        return lines
+    }
+
+    private static func header(_ machine: MachineInfo) -> String {
         let used = String(format: "%.1f", Double(machine.memUsedBytes) / 1_073_741_824)
         let total = String(format: "%.1f", Double(machine.memTotalBytes) / 1_073_741_824)
-        return "\(load)   mem \(used)/\(total) GB"
+        return "\(machine.cpuCount) cores   mem \(used)/\(total) GB"
     }
 
     private static func columnHeading(_ title: String, width: Int) -> String {
+        // 100% is one core, the same convention as Activity Monitor's %CPU column, said
+        // once so the rows need no explaining.
         pad(title, to: width) + right("CPU", 6) + right("RAM", 8)
             + right("PROC", 6) + right("DOCKER", 8)
     }
@@ -365,13 +402,13 @@ extension Renderer {
         var lines: [String] = []
         let machine = snapshot.machine
 
-        let ratio = machine.oversubscription
-        var header = "load \(String(format: "%.1f", machine.loadAverage1))"
-            + "  \(machine.cpuCount) cores"
-        if ratio > 1 { header += "  \(String(format: "%.1f", ratio))x" }
-        let memory = "mem \(String(format: "%.1f", Double(machine.memUsedBytes) / 1_073_741_824))"
-            + "/\(String(format: "%.0f", Double(machine.memTotalBytes) / 1_073_741_824))G"
-        lines.append(fit(header, memory, width: width))
+        let summary = headlines(snapshot)
+        if summary.count >= 2 {
+            lines.append(fit(summary[0], summary[1], width: width))
+            for extra in summary.dropFirst(2) { lines.append(clip(extra, width)) }
+        } else {
+            lines += summary.map { clip($0, width) }
+        }
 
         if case .cached(let age) = status.rosterSource {
             lines.append(clip("session list is cached (\(Int(age))s old), "
@@ -544,7 +581,7 @@ extension Renderer {
     /// Only for groups heavy enough to be worth acting on: half a core is the same
     /// threshold the store uses to decide a group is worth keeping detail for. A group
     /// running one of everything gets nothing, because the row already said that.
-    static func detailRows(for group: AttributionGroup, limit: Int) -> [ProcessKind] {
+    public static func detailRows(for group: AttributionGroup, limit: Int) -> [ProcessKind] {
         guard (group.cpuPercent ?? 0) >= 50,
               group.breakdown.contains(where: { $0.count > 1 }) || group.breakdown.count > 1
         else { return [] }

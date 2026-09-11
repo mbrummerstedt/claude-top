@@ -10,7 +10,13 @@ import Foundation
 /// The saving is available because a process's environment and arguments are fixed at
 /// exec and never change afterwards. Only processes that were not there last time are
 /// worth reading, and on a steady machine that is almost none of them.
-public final class IncrementalCollector {
+public final class IncrementalCollector: @unchecked Sendable {
+
+    /// The cache is mutable state reached from whatever task is sampling, which on the
+    /// app side is a detached one and on the CLI side is the main thread. Calls are
+    /// serialised anyway, so the lock costs nothing and makes that a fact rather than an
+    /// assumption.
+    private let lock = NSLock()
 
     private let readTable: ([Int32: String], [Int32: [String]]) -> [ProcessSample]
     private let readEnvironments: ([Int32]) -> ([Int32: ProcessEnvironment],
@@ -23,7 +29,10 @@ public final class IncrementalCollector {
     /// different process wearing the same number.
     private var startTimes: [Int32: Date] = [:]
 
-    public var cachedProcessCount: Int { environments.count }
+    public var cachedProcessCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return environments.count
+    }
 
     public init(
         readTable: @escaping ([Int32: String], [Int32: [String]]) -> [ProcessSample]
@@ -40,6 +49,9 @@ public final class IncrementalCollector {
     /// shell-outs with their own timeouts and their own reasons to be skipped.
     public func collect(containers: [ContainerInfo] = [], roster: Roster? = nil,
                         timeout: TimeInterval = 3) -> RawSample {
+        lock.lock()
+        defer { lock.unlock() }
+
         // Cheap, and the only part that has to happen every tick.
         var table = readTable(commands, arguments)
         let readAt = Date()
