@@ -1,4 +1,5 @@
 import SwiftUI
+import ServiceManagement
 import ClaudeTopKit
 
 /// The menu bar companion to the CLI. A view over ClaudeTopKit with no logic of its own.
@@ -104,6 +105,35 @@ final class ResourceModel: ObservableObject {
         SamplerCoordinator.release()
     }
 
+    // MARK: - starting with the machine
+
+    /// Registered through `SMAppService`, so it appears in System Settings under Login
+    /// Items and can be revoked there. A hand-written LaunchAgent would start the app just
+    /// as well and would be invisible to anyone looking for what runs at login.
+    var startsAtLogin: Bool {
+        SMAppService.mainApp.status == .enabled
+    }
+
+    func setStartsAtLogin(_ wanted: Bool) {
+        do {
+            if wanted {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+            loginItemProblem = nil
+        } catch {
+            // Registration fails for a bundle macOS will not vouch for, which includes one
+            // run out of a build directory. Saying so beats a toggle that silently
+            // springs back.
+            loginItemProblem = "\(error.localizedDescription). "
+                + "Move ClaudeTop.app into /Applications and try again."
+        }
+        objectWillChange.send()
+    }
+
+    @Published var loginItemProblem: String?
+
     private func tick() async {
         // Paused while a confirmation is on screen. A list that changes under the cursor
         // is a list you cannot agree to.
@@ -122,6 +152,13 @@ final class ResourceModel: ObservableObject {
         if let store = try? ResourceStore(path: ResourceStore.defaultPath) {
             try? store.write(snapshot, processes: sample.processes, cpuPercents: cpu)
             try? store.writeBaseline(sample.processes, at: sample.processesReadAt)
+            // The clock an unattended reap reads. Only meaningful when the roster was
+            // actually read: recording from a failed read would start a clock on sessions
+            // that are alive.
+            if sample.roster.allowsReaping {
+                try? store.recordOrphans(snapshot.orphans.map(\.key),
+                                         at: sample.processesReadAt)
+            }
         }
     }
 
@@ -626,9 +663,17 @@ struct Footer: View {
     @ObservedObject var model: ResourceModel
 
     var body: some View {
+        if let problem = model.loginItemProblem {
+            Text(problem).font(.caption2).foregroundStyle(.orange)
+        }
         HStack {
             Text(cost).font(.caption2).foregroundStyle(.tertiary)
             Spacer()
+            Toggle("Start at login", isOn: Binding(
+                get: { model.startsAtLogin },
+                set: { model.setStartsAtLogin($0) }))
+                .toggleStyle(.checkbox)
+                .font(.caption2)
             Button("Quit") {
                 model.stop()
                 NSApplication.shared.terminate(nil)

@@ -34,6 +34,9 @@ USAGE
   claude-top --statusline       one line for a shell prompt
   claude-top --hook <event>     pre-tool-use or session-start; see docs/HOOKS.md
   claude-top --reap             stop the leftovers of sessions that are gone
+  claude-top --auto-reap        unattended; only worktrees abandoned past a quarantine
+      --older-than <duration>   how long abandoned before eligible (default 8h)
+      --limit <n>               most groups one run may stop (default 3)
       --dry-run                 show what would be stopped and stop nothing
       --yes                     skip the confirmation, for scripts that already decided
 
@@ -215,8 +218,73 @@ if flag("--sample") {
     do {
         try store.write(snapshot, processes: sample.processes, cpuPercents: cpu)
         try store.writeBaseline(sample.processes, at: sample.processesReadAt)
+        // Only meaningful when the roster was actually read. Recording orphans from a
+        // failed read would start a clock on sessions that are alive.
+        if sample.roster.allowsReaping {
+            try store.recordOrphans(snapshot.orphans.map(\.key), at: sample.processesReadAt)
+        }
     } catch {
         fail("\(error)")
+    }
+    exit(0)
+}
+
+if flag("--auto-reap") {
+    // The unattended path. Everything else in this tool puts a list in front of a person
+    // first; this one runs from a timer, so it is narrower than all of them.
+    let quarantine = value("--older-than").flatMap(parseDuration) ?? AutoReap.defaultQuarantine
+    let limit = value("--limit").flatMap(Int.init) ?? AutoReap.defaultLimit
+
+    let sample = Sampler.collect()
+    let snapshot = Sampler.attribute(sample, cpuPercents: [:])
+
+    // A roster that could not be read makes every live session look abandoned. Unattended,
+    // with nobody to notice, that is the one failure worth exiting quietly for.
+    guard sample.roster.allowsReaping else {
+        print("roster not readable, doing nothing")
+        exit(0)
+    }
+
+    guard let store = openStore() else { fail("cannot open \(ResourceStore.defaultPath)") }
+    try? store.recordOrphans(snapshot.orphans.map(\.key), at: sample.processesReadAt)
+
+    let eligible = AutoReap.eligible(orphans: snapshot.orphans,
+                                     orphanedSince: store.orphanedSince(),
+                                     quarantine: quarantine, now: Date(), limit: limit)
+    guard !eligible.isEmpty else {
+        print("nothing abandoned for longer than \(Int(quarantine / 3600))h")
+        exit(0)
+    }
+
+    let keep = Reaper.keepMarkedWorktrees(in: sample)
+    let plans = eligible.map { group in
+        (group, AttributionEngine.reapPlan(
+            for: group.key, processes: sample.processes, environments: sample.environments,
+            containers: sample.containers, roster: sample.roster, keepMarkedWorktrees: keep))
+    }.filter { !$0.1.isEmpty }
+
+    for (group, plan) in plans {
+        let since = store.orphanedSince()[group.key.storageKey]
+        let age = since.map { Int(Date().timeIntervalSince($0) / 3600) } ?? 0
+        print("\(group.label): abandoned \(age)h, "
+              + "\(plan.processes.count) processes, \(plan.containers.count) containers")
+        for target in plan.processes { print("    \(target.pid)  \(target.command.prefix(90))") }
+        for target in plan.containers { print("    container \(target.name)") }
+    }
+
+    if flag("--dry-run") {
+        print("dry run, nothing was stopped")
+        exit(0)
+    }
+
+    let reaper = Reaper()
+    for (group, plan) in plans {
+        let outcome = reaper.execute(plan)
+        print("\(group.label): \(outcome.terminated.count) signalled, "
+              + "\(outcome.killed.count) escalated, "
+              + "\(outcome.containersStopped.count) containers stopped"
+              + (outcome.survived.isEmpty ? ""
+                 : ", survived: \(outcome.survived.map(String.init).joined(separator: ", "))"))
     }
     exit(0)
 }
