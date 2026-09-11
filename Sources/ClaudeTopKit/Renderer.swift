@@ -462,7 +462,8 @@ extension Renderer {
                              ? "  ·  \(snapshot.unreadableProcessCount) processes not inspectable"
                              : ""), width))
         let offerReap = !orphans.isEmpty && status.rosterSource == .live
-        lines.append(clip("q quit" + (offerReap ? "  ·  claude-top --reap" : ""), width))
+        lines.append(clip("q quit" + (offerReap ? "  ·  r stop the abandoned ones" : ""),
+                          width))
 
         return lines.prefix(height).joined(separator: "\n")
     }
@@ -582,7 +583,7 @@ extension Renderer {
         return left + String(repeating: " ", count: width - left.count - right.count) + right
     }
 
-    private static func clip(_ text: String, _ width: Int) -> String {
+    static func clip(_ text: String, _ width: Int) -> String {
         text.count <= width ? text : String(text.prefix(width))
     }
 

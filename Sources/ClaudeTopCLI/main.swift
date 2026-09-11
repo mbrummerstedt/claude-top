@@ -250,7 +250,7 @@ if flag("--reap") {
         AttributionEngine.reapPlan(
             for: group.key, processes: sample.processes, environments: sample.environments,
             containers: sample.containers, roster: sample.roster,
-            keepMarkedWorktrees: keepMarkedWorktrees(in: sample))
+            keepMarkedWorktrees: Reaper.keepMarkedWorktrees(in: sample))
     }
 
     // Said plainly rather than reported as "nothing found". A roster that could not be
@@ -316,23 +316,6 @@ if flag("--reap") {
               + "\(outcome.containersStopped.count) containers stopped")
     }
     exit(0)
-}
-
-/// A `.claude-top-keep` file in a worktree exempts it entirely, no matter what else the
-/// plan says.
-func keepMarkedWorktrees(in sample: RawSample) -> Set<String> {
-    var marked: Set<String> = []
-    let candidates = Set(sample.environments.values.compactMap(\.pwd)
-                         + sample.sessions.map(\.cwd))
-    for path in candidates {
-        guard let marker = path.range(of: "/.claude/worktrees/") else { continue }
-        guard let name = path[marker.upperBound...].split(separator: "/").first else { continue }
-        let root = String(path[path.startIndex..<marker.upperBound]) + name
-        if FileManager.default.fileExists(atPath: root + "/.claude-top-keep") {
-            marked.insert(root)
-        }
-    }
-    return marked
 }
 
 // MARK: - the default reading
