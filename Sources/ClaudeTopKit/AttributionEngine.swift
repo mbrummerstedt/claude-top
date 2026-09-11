@@ -27,7 +27,8 @@ public enum AttributionEngine {
         containers: [ContainerInfo],
         sessions: [SessionInfo],
         cpuPercents: [Int32: Double],
-        machine: MachineInfo
+        machine: MachineInfo,
+        dockerAnswered: Bool = true
     ) -> Snapshot {
         let byProcess = resolveProcesses(processes: processes, environments: environments,
                                          sessions: sessions)
@@ -104,7 +105,8 @@ public enum AttributionEngine {
         return Snapshot(machine: machine,
                         groups: disambiguate(groups).sorted(by: ordered),
                         containerGroups: containerGroups(containers: containers,
-                                                         sessions: sessions))
+                                                         sessions: sessions),
+                        dockerAnswered: dockerAnswered)
     }
 
     /// Sessions started from the same directory produce the same label, and several
@@ -595,16 +597,25 @@ public enum AttributionEngine {
 
             if let was = baseline[proc.pid], isSameProcess(was, proc) {
                 consumed = proc.cpuTime - was.cpuTime
-                over = elapsed
-            } else {
-                // Either newly spawned or a recycled PID. Both are measured from this
-                // process's own start, never diffed against whatever held the PID before:
-                // on a machine at load 55 PIDs recycle within minutes, and that diff
-                // would come out negative.
+            } else if proc.startedAt >= earlierAt {
+                // Newly spawned, or a recycled PID. Never diffed against whatever held
+                // the PID before: at load 55 PIDs recycle within minutes and that diff
+                // would come out negative. Its whole life falls inside the window, so
+                // its whole CPU time does too.
                 consumed = proc.cpuTime
-                let sinceBirth = laterAt.timeIntervalSince(proc.startedAt)
-                over = sinceBirth > 0 && sinceBirth < elapsed ? sinceBirth : elapsed
+            } else {
+                // Present now, absent from the baseline, and older than the window. How
+                // much of its lifetime CPU it spent inside the window is not knowable,
+                // and charging all of it against a 700ms window reads as five figures.
+                // Unknown, which a caller renders as unknown.
+                continue
             }
+
+            // Always elapsed wall time, never the process's own age. A row is a share of
+            // the sampling window, because that is what the headline compares it against:
+            // measuring a 50ms hook script against its own 50ms life reads 100% and puts
+            // it above the process actually melting a core.
+            over = elapsed
 
             out[proc.pid] = consumed > 0 ? (consumed / over) * 100 : 0
         }

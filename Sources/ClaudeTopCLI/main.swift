@@ -34,8 +34,8 @@ USAGE
   claude-top --statusline       one line for a shell prompt
   claude-top --hook <event>     pre-tool-use or session-start; see docs/HOOKS.md
   claude-top --reap             stop the leftovers of sessions that are gone
-  claude-top --auto-reap        unattended; only worktrees abandoned past a quarantine
-      --older-than <duration>   how long abandoned before eligible (default 8h)
+  claude-top --auto-reap        unattended; only worktrees orphaned past a quarantine
+      --older-than <duration>   how long orphaned before eligible (default 8h)
       --limit <n>               most groups one run may stop (default 3)
       --dry-run                 show what would be stopped and stop nothing
       --yes                     skip the confirmation, for scripts that already decided
@@ -238,7 +238,7 @@ if flag("--auto-reap") {
     let sample = Sampler.collect()
     let snapshot = Sampler.attribute(sample, cpuPercents: [:])
 
-    // A roster that could not be read makes every live session look abandoned. Unattended,
+    // A roster that could not be read makes every live session look orphaned. Unattended,
     // with nobody to notice, that is the one failure worth exiting quietly for.
     guard sample.roster.allowsReaping else {
         print("roster not readable, doing nothing")
@@ -252,7 +252,7 @@ if flag("--auto-reap") {
                                      orphanedSince: store.orphanedSince(),
                                      quarantine: quarantine, now: Date(), limit: limit)
     guard !eligible.isEmpty else {
-        print("nothing abandoned for longer than \(Int(quarantine / 3600))h")
+        print("nothing orphaned for longer than \(Int(quarantine / 3600))h")
         exit(0)
     }
 
@@ -266,7 +266,7 @@ if flag("--auto-reap") {
     for (group, plan) in plans {
         let since = store.orphanedSince()[group.key.storageKey]
         let age = since.map { Int(Date().timeIntervalSince($0) / 3600) } ?? 0
-        print("\(group.label): abandoned \(age)h, "
+        print("\(group.label): orphaned \(age)h, "
               + "\(plan.processes.count) processes, \(plan.containers.count) containers")
         for target in plan.processes { print("    \(target.pid)  \(target.command.prefix(90))") }
         for target in plan.containers { print("    container \(target.name)") }
@@ -327,7 +327,7 @@ if flag("--reap") {
     }
 
     // Said plainly rather than reported as "nothing found". A roster that could not be
-    // read makes every live session look abandoned, so refusing is the whole point, and
+    // read makes every live session look orphaned, so refusing is the whole point, and
     // a refusal that looks like an empty result teaches the wrong thing.
     if let refused = plans.first(where: { $0.refusal == .rosterNotLive }) {
         _ = refused
@@ -338,7 +338,7 @@ if flag("--reap") {
         case .live: age = ""
         }
         fail("refusing to reap: the session roster could not be read just now, and \(age). "
-             + "Without it every live session looks abandoned. Try again, or check "
+             + "Without it every live session looks orphaned. Try again, or check "
              + "`claude agents --json` responds.")
     }
 

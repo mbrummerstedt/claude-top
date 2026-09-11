@@ -47,7 +47,8 @@ public final class IncrementalCollector: @unchecked Sendable {
 
     /// One tick. Containers and the roster are collected by the caller, since both are
     /// shell-outs with their own timeouts and their own reasons to be skipped.
-    public func collect(containers: [ContainerInfo] = [], roster: Roster? = nil,
+    public func collect(containers: [ContainerInfo] = [], dockerAnswered: Bool = true,
+                        roster: Roster? = nil,
                         timeout: TimeInterval = 3) -> RawSample {
         lock.lock()
         defer { lock.unlock() }
@@ -94,6 +95,7 @@ public final class IncrementalCollector: @unchecked Sendable {
             processesReadAt: readAt,
             environments: environments,
             containers: containers,
+            dockerAnswered: dockerAnswered,
             roster: roster ?? Roster(sessions: [], source: .unavailable),
             machine: MachineProbe.current(capturedAt: readAt, processCount: table.count))
     }

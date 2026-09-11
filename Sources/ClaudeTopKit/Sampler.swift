@@ -8,6 +8,9 @@ public struct RawSample: Sendable {
     public let processesReadAt: Date
     public let environments: [Int32: ProcessEnvironment]
     public let containers: [ContainerInfo]
+    /// False when no docker answered in time. Kept apart from an empty `containers`,
+    /// which is a real answer.
+    public let dockerAnswered: Bool
     public let roster: Roster
     public let machine: MachineInfo
 
@@ -15,9 +18,11 @@ public struct RawSample: Sendable {
 
     public init(processes: [ProcessSample], processesReadAt: Date,
                 environments: [Int32: ProcessEnvironment], containers: [ContainerInfo],
+                dockerAnswered: Bool = true,
                 roster: Roster, machine: MachineInfo) {
         self.processes = processes; self.processesReadAt = processesReadAt
         self.environments = environments; self.containers = containers
+        self.dockerAnswered = dockerAnswered
         self.roster = roster; self.machine = machine
     }
 }
@@ -38,11 +43,13 @@ public enum Sampler {
         let processes = ProcessTable.current(commands: commands, arguments: arguments)
         let readAt = Date()
 
+        let listing = ContainerCollector.current(timeout: timeout)
         return RawSample(
             processes: processes,
             processesReadAt: readAt,
             environments: environments,
-            containers: ContainerCollector.current(timeout: timeout),
+            containers: listing.containers,
+            dockerAnswered: listing.answered,
             roster: SessionRoster.live(),
             machine: MachineProbe.current(capturedAt: readAt, processCount: pids.count))
     }
@@ -80,7 +87,8 @@ public enum Sampler {
             containers: sample.containers,
             sessions: sample.sessions,
             cpuPercents: cpuPercents,
-            machine: sample.machine)
+            machine: sample.machine,
+            dockerAnswered: sample.dockerAnswered)
 
         guard let previousTicks, let ticks = sample.machine.cpuTicks,
               let systemCPU = AttributionEngine.systemCPU(earlier: previousTicks,
@@ -88,6 +96,7 @@ public enum Sampler {
         else { return snapshot }
 
         return Snapshot(machine: snapshot.machine, groups: snapshot.groups,
-                        containerGroups: snapshot.containerGroups, systemCPU: systemCPU)
+                        containerGroups: snapshot.containerGroups, systemCPU: systemCPU,
+                        dockerAnswered: snapshot.dockerAnswered)
     }
 }

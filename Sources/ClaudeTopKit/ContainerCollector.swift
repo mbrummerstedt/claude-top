@@ -7,7 +7,19 @@ import Foundation
 /// nothing else: attribution still works, because attribution comes from labels.
 public enum ContainerCollector {
 
-    public static func current(timeout: TimeInterval = 3) -> [ContainerInfo] {
+    /// What a listing attempt produced. `answered` is false only when no docker on this
+    /// machine responded in time, which is a different fact from finding no containers
+    /// and must not be rendered as one.
+    public struct Listing: Sendable {
+        public let containers: [ContainerInfo]
+        public let answered: Bool
+
+        public init(containers: [ContainerInfo], answered: Bool) {
+            self.containers = containers; self.answered = answered
+        }
+    }
+
+    public static func current(timeout: TimeInterval = 3) -> Listing {
         let binaries = Shell.locateAll("docker", extraDirectories: [
             (NSHomeDirectory() as NSString).appendingPathComponent(".docker/bin"),
             "/Applications/Docker.app/Contents/Resources/bin",
@@ -24,12 +36,16 @@ public enum ContainerCollector {
             containers = parseContainers(psJSONLines: listing)
             break
         }
-        guard let docker, !containers.isEmpty else { return [] }
+        // `docker` is nil only when every binary failed or timed out. Having a docker
+        // that answered with no containers is a real answer, and stays one.
+        guard let docker else { return Listing(containers: [], answered: false) }
+        guard !containers.isEmpty else { return Listing(containers: [], answered: true) }
 
         let stats = Shell.run(docker, ["stats", "--no-stream", "--format", "{{json .}}"],
                               timeout: timeout)
             .map { parseStats(statsJSONLines: $0) } ?? [:]
-        return merge(containers: containers, stats: stats)
+        return Listing(containers: merge(containers: containers, stats: stats),
+                       answered: true)
     }
 
     public static func parseContainers(psJSONLines: String) -> [ContainerInfo] {

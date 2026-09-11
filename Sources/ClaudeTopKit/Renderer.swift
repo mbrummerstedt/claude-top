@@ -26,34 +26,51 @@ public enum Renderer {
         if !snapshot.sessions.isEmpty {
             lines.append(columnHeading("CLAUDE SESSIONS", width: width))
             for group in snapshot.sessions {
-                lines.append(row(group, asOf: snapshot.machine.capturedAt, width: width))
+                lines.append(row(group, asOf: snapshot.machine.capturedAt, width: width,
+                                 dockerAnswered: snapshot.dockerAnswered))
                 lines += detailRows(for: group, limit: 3).map { kindRow($0, width: width) }
             }
+            lines.append(totalRow(Snapshot.totals(of: snapshot.sessions), width: width,
+                                  dockerAnswered: snapshot.dockerAnswered))
             lines.append("")
         }
 
         if !snapshot.orphans.isEmpty {
-            let orphans = snapshot.orphans
-            let cpu = orphans.compactMap(\.cpuPercent).reduce(0, +)
-            let rss = orphans.reduce(UInt64(0)) { $0 + $1.rssBytes }
-            let processes = orphans.reduce(0) { $0 + $1.pids.count }
-            let containers = orphans.reduce(0) { $0 + $1.containerIDs.count }
-            lines.append(pad("ORPHANED (worktrees with no live session)", to: width)
-                         + right(format(cpu: cpu), 6) + right(formatBytes(rss), 8)
-                         + right("\(processes)", 6) + right("\(containers)", 8))
-            lines += orphans.map { row($0, asOf: snapshot.machine.capturedAt, width: width, showAge: true) }
+            // The heading used to carry the section's totals, which put a row of zeroes
+            // at the top of the one panel a person opens this tool to act on: the host
+            // processes are gone, which is what makes these orphans, while the compose
+            // projects they left behind are still running. The cost is in DOCKER CPU, so
+            // the totals belong at the foot in the same columns as everything else.
+            lines.append(columnHeading("ORPHANED (worktrees with no live session)",
+                                       width: width, age: true))
+            lines += snapshot.orphans.map {
+                row($0, asOf: snapshot.machine.capturedAt, width: width, showAge: true,
+                    dockerAnswered: snapshot.dockerAnswered)
+            }
+            lines.append(totalRow(Snapshot.totals(of: snapshot.orphans), width: width,
+                                  dockerAnswered: snapshot.dockerAnswered))
             lines.append("")
         }
 
         if !snapshot.containerGroups.isEmpty {
             let containers = snapshot.containerGroups.reduce(0) { $0 + $1.containers.count }
-            lines.append("DOCKER (\(containers) containers, cpu is inside the VM)")
+            lines.append("DOCKER (\(containers) containers)")
+            // The relationship, said out loud. "Docker" names two different measurements
+            // on this screen: a host process in EVERYTHING ELSE, and the containers that
+            // process is running, clocked inside the VM. The second is a breakdown of
+            // part of the first, so adding them counts the same work twice.
+            lines.append("  container CPU is measured inside the VM, and is already part "
+                         + "of the Docker row")
+            lines.append("  in EVERYTHING ELSE, not extra to it")
             // Two columns rather than one run-on string: the project is what you type
             // at docker, and the owner is what tells you whether you may.
             // Sized to its own content rather than inherited from the group rows: a
             // project name and an owner on one line need more room than a worktree label
             // does, and truncating the owner is what makes the row useless.
-            let projectWidth = min(30, max(12, snapshot.containerGroups
+            // Wide enough for a compose project generated from a worktree name, because
+            // the project is what you type at `docker compose -p` and one truncated in
+            // the middle cannot be typed at all.
+            let projectWidth = min(44, max(12, snapshot.containerGroups
                                             .map(\.project.count).max() ?? 12))
             let ownerWidth = min(46, max(16, snapshot.containerGroups.map {
                 ($0.label.isEmpty ? 12 : $0.label.count) + ($0.isReapable ? 13 : 0)
@@ -74,15 +91,20 @@ public enum Renderer {
             if !stoppable.isEmpty {
                 let count = stoppable.reduce(0) { $0 + $1.containers.count }
                 lines.append("  \(count) container\(count == 1 ? "" : "s") in "
-                             + "\(stoppable.count) abandoned "
+                             + "\(stoppable.count) orphaned "
                              + "project\(stoppable.count == 1 ? "" : "s") can be stopped")
             }
             lines.append("")
         }
 
         if !snapshot.everythingElse.isEmpty {
-            lines.append("EVERYTHING ELSE")
-            lines += snapshot.everythingElse.map { row($0, asOf: snapshot.machine.capturedAt, width: width) }
+            lines.append(columnHeading("EVERYTHING ELSE", width: width))
+            lines += snapshot.everythingElse.map {
+                row($0, asOf: snapshot.machine.capturedAt, width: width,
+                    dockerAnswered: snapshot.dockerAnswered)
+            }
+            lines.append(totalRow(Snapshot.totals(of: snapshot.everythingElse), width: width,
+                                  dockerAnswered: snapshot.dockerAnswered))
             lines.append("")
         }
 
@@ -90,12 +112,23 @@ public enum Renderer {
         // only for your own processes, so a third of a Mac is not visible here, and a
         // breakdown that quietly omits it is the sort of number this tool replaces.
         if snapshot.unreadableProcessCount > 0 {
-            lines.append("\(snapshot.unreadableProcessCount) processes belong to other users "
-                         + "and cannot be inspected")
+            lines.append("\(snapshot.unreadableProcessCount) of \(snapshot.machine.processCount) "
+                         + "processes belong to other users and cannot be inspected: their "
+                         + "CPU and")
+            lines.append("memory are missing from every row above")
         }
-
+        // The one case where a missing DOCKER section is not the same as no containers.
+        if !snapshot.dockerAnswered {
+            lines.append("docker did not answer in time, so the container columns are "
+                         + "unknown rather than zero")
+        }
+        // Why the RAM column does not sum to the figure in the headline. Both effects run
+        // at once and in opposite directions, so neither number is wrong.
+        lines.append("RAM is resident size: pages shared between processes are counted "
+                     + "once in each")
         return lines.joined(separator: "\n")
     }
+
 
     /// The headline, in the units a developer already reads elsewhere.
     ///
@@ -127,14 +160,28 @@ public enum Renderer {
                          + "for \(machine.cpuCount) cores, so everything waits")
         }
 
-        // The gap, stated. On a busy Mac it is large, and a tool that shows the smaller
-        // number without explaining it reads as wrong even when every figure is right.
-        if let unaccounted = snapshot.unaccountedCPUPercent, unaccounted > 20,
-           snapshot.unreadableProcessCount > 0 {
-            lines.append("this sees \(String(format: "%.1f", snapshot.visibleCores)) of those "
-                         + "cores; \(String(format: "%.1f", unaccounted / 100)) are in "
-                         + "\(snapshot.unreadableProcessCount) processes macOS will not let it read")
+        // The gap, stated, and named for what it is rather than for one of the things
+        // inside it. Unconditional: it used to appear only above 20%, which meant that on
+        // a quiet machine the rows stopped adding up with nothing on screen to say why.
+        if let unaccounted = snapshot.unaccountedCPUPercent {
+            lines.append("\(String(format: "%.1f", snapshot.visibleCores)) of those cores are "
+                         + "accounted for below; "
+                         + "\(String(format: "%.1f", unaccounted / 100)) unaccounted")
+            // Why it cannot do better, so nobody reads the gap as an oversight. macOS
+            // answers task questions only about your own processes and refuses at any
+            // granularity, so the causes cannot be separated from in here. Two short
+            // lines rather than one long one: this wraps on an 80-column terminal, and a
+            // wrapped caveat is one nobody finishes reading.
+            lines.append(snapshot.unreadableProcessCount > 0
+                ? "that is kernel time plus \(snapshot.unreadableProcessCount) processes "
+                  + "macOS hides from unprivileged tools"
+                : "that is kernel time plus whatever the sampling window missed")
         }
+
+        // Said once, so no row has to explain itself. The headline is a share of the
+        // whole machine and every row is a share of one core; both are what Activity
+        // Monitor shows, but it never puts the two on one screen and this does.
+        lines.append("rows below are per-core, as in Activity Monitor: 100% is one core")
         return lines
     }
 
@@ -144,28 +191,58 @@ public enum Renderer {
         return "\(machine.cpuCount) cores   mem \(used)/\(total) GB"
     }
 
-    private static func columnHeading(_ title: String, width: Int) -> String {
-        // 100% is one core, the same convention as Activity Monitor's %CPU column, said
-        // once so the rows need no explaining.
-        pad(title, to: width) + right("CPU", 6) + right("RAM", 8)
-            + right("PROC", 6) + right("DOCKER", 8)
+    private static func columnHeading(_ title: String, width: Int,
+                                      age: Bool = false) -> String {
+        // CPU is host CPU, in per-core units. DOCKER CPU is the same group's containers,
+        // measured inside the VM against a different clock, which is why it is a separate
+        // column and never folded into the first one.
+        pad(title, to: width) + right("CPU", 6) + right("RAM", 7)
+            + right("PROC", 5) + right("DOCKER", 7) + right("DOCKER CPU", 11)
+            + (age ? right("AGE", 6) : "")
     }
 
     /// Ages are measured from when the snapshot was taken, not from now. A sample read
     /// back out of the store through `--since` is history, and dating it against the
     /// current clock would report an age that grows every time it is printed.
     private static func row(_ group: AttributionGroup, asOf: Date, width: Int,
-                            showAge: Bool = false) -> String {
+                            showAge: Bool = false, dockerAnswered: Bool = true) -> String {
         var line = pad("  " + displayLabel(group), to: width)
             + right(format(cpu: group.cpuPercent), 6)
-            + right(formatBytes(group.rssBytes), 8)
-            + right("\(group.pids.count)", 6)
-            + right("\(group.containerIDs.count)", 8)
+            + right(formatBytes(group.rssBytes), 7)
+            + right("\(group.pids.count)", 5)
+            + right(dockerAnswered ? "\(group.containerIDs.count)" : "?", 7)
+            + right(dockerAnswered
+                    ? formatContainerCPU(group.containerCPUPercent,
+                                         containers: group.containerIDs.count)
+                    : "?", 11)
 
         if showAge, let started = group.oldestProcessStartedAt {
             line += right(formatDuration(asOf.timeIntervalSince(started)), 6)
         }
         return line
+    }
+
+    /// The bottom line of a section, in the same columns as the rows above it.
+    private static func totalRow(_ totals: Snapshot.SectionTotals, width: Int,
+                                 dockerAnswered: Bool = true) -> String {
+        pad("  TOTAL", to: width)
+            + right(format(cpu: totals.cpuPercent), 6)
+            + right(formatBytes(totals.rssBytes), 7)
+            + right("\(totals.processCount)", 5)
+            + right(dockerAnswered ? "\(totals.containerCount)" : "?", 7)
+            + right(dockerAnswered
+                    ? formatContainerCPU(totals.containerCPUPercent,
+                                         containers: totals.containerCount)
+                    : "?", 11)
+    }
+
+    /// Three states, not two. A dash means there are no containers here and nothing was
+    /// asked; `?` means docker was asked and did not answer in time, which is a different
+    /// thing from zero and must not read as idle.
+    private static func formatContainerCPU(_ cpu: Double?, containers: Int) -> String {
+        guard containers > 0 else { return "—" }
+        guard let cpu else { return "?" }
+        return "\(Int(cpu.rounded()))%"
     }
 
     /// A worktree name is the better handle when there is one: it is what the person
@@ -229,6 +306,14 @@ public enum Renderer {
             "memTotalBytes": snapshot.machine.memTotalBytes,
             "processCount": snapshot.machine.processCount,
             "unreadableProcessCount": snapshot.unreadableProcessCount,
+            // The headline, so a consumer can reproduce it rather than summing rows and
+            // hoping. `busyPercent` is a share of the whole machine; every group's
+            // `cpuPercent` is per-core, and `busyCores` is the bridge between the two.
+            // `unaccountedCores` is how far the rows fall short, which is the measure of
+            // how much of the machine this snapshot is actually describing.
+            "busyPercent": snapshot.systemCPU?.busyPercent as Any,
+            "busyCores": snapshot.busyCores as Any,
+            "unaccountedCores": snapshot.unaccountedCPUPercent.map { $0 / 100 } as Any,
         ]
 
         let groups: [[String: Any]] = snapshot.groups.map { group in
@@ -313,10 +398,14 @@ public enum Renderer {
         let warning = machine.oversubscription > 1.5 ? "⚠ " : ""
         var line = "\(warning)load \(String(format: "%.1f", machine.loadAverage1))/\(machine.cpuCount)"
 
+        // In cores, not per-core percent. A prompt has no room for a legend, and `291%`
+        // sitting beside `load 55.6/10` asks the reader to hold two denominators at once
+        // and reads as a machine on fire. `2.9 cores` is comparable to the `/10` it sits
+        // next to without anything having to be explained.
         if let sessionID,
            let mine = snapshot.groups.first(where: { $0.key == .session(uuid: sessionID) }),
            let cpu = mine.cpuPercent {
-            line += "  self \(Int(cpu.rounded()))%"
+            line += "  self \(String(format: "%.1f", cpu / 100)) cores"
         }
         return line
     }
@@ -497,9 +586,12 @@ extension Renderer {
                           + "every \(Int(status.refreshInterval))s"
                           + (snapshot.unreadableProcessCount > 0
                              ? "  ·  \(snapshot.unreadableProcessCount) processes not inspectable"
-                             : ""), width))
+                             : "")
+                          // Blank container cells read as "none" here. They mean "not
+                          // asked" until docker has answered once.
+                          + (snapshot.dockerAnswered ? "" : "  ·  docker silent"), width))
         let offerReap = !orphans.isEmpty && status.rosterSource == .live
-        lines.append(clip("q quit" + (offerReap ? "  ·  r stop the abandoned ones" : ""),
+        lines.append(clip("q quit" + (offerReap ? "  ·  r stop the orphaned ones" : ""),
                           width))
 
         return lines.prefix(height).joined(separator: "\n")
@@ -529,7 +621,7 @@ extension Renderer {
                 ? " holding " + formatBytes(stoppable.reduce(UInt64(0)) { $0 + ($1.rssBytes ?? 0) })
                 : ""
             heading += "\n\(count) container\(count == 1 ? "" : "s") in "
-                + "\(stoppable.count) abandoned project\(stoppable.count == 1 ? "" : "s")"
+                + "\(stoppable.count) orphaned project\(stoppable.count == 1 ? "" : "s")"
                 + freed + " can be stopped"
         }
         for line in heading.split(separator: "\n") { lines.append(clip(String(line), width)) }
@@ -601,8 +693,15 @@ extension Renderer {
         let cpu = group.cpuPercent.map { "\(Int($0.rounded()))%" } ?? "?"
         var right = right(cpu, 6) + right(formatBytes(group.rssBytes), 7)
             + right("\(group.pids.count)p", 5)
-        if group.containerIDs.isEmpty { right += "     " }
-        else { right += self.right("\(group.containerIDs.count)c", 5) }
+        // Containers and what they cost, together. Without the second figure an orphan
+        // whose host processes are gone reads as free in the one view a person watches
+        // while deciding what to stop.
+        if group.containerIDs.isEmpty { right += "          " }
+        else {
+            right += self.right("\(group.containerIDs.count)c", 5)
+                + self.right(group.containerCPUPercent
+                             .map { "\(Int($0.rounded()))%" } ?? "?", 5)
+        }
         if showAge {
             right += self.right(group.oldestProcessStartedAt
                                 .map { formatDuration(asOf.timeIntervalSince($0)) } ?? "", 5)
