@@ -24,11 +24,15 @@ public enum SystemFamily: String, Hashable, Sendable {
 public enum AttributionTier: Int, Comparable, Sendable {
     case envStamp = 0        // CLAUDE_CODE_MESSAGING_SOCKET, survives session death
     case processTree = 1     // ppid walk from a live session root
-    case worktreePath = 2    // PWD or vnode path under .claude/worktrees/
-    case containerLabel = 3  // compose working_dir, or testcontainers session-id
+    /// PWD under `.claude/worktrees/`, and an ancestor is the Claude desktop app. The
+    /// same placement as `worktreePath` with provenance the path alone cannot give: the
+    /// app started it, so it is not the editor the person opened on the same directory.
+    case claudeLaunched = 2
+    case worktreePath = 3    // PWD or vnode path under .claude/worktrees/, and that is all
+    case containerLabel = 4  // compose working_dir, or testcontainers session-id
     /// No rule fired. Named `unresolved` rather than `none` because `x?.tier == .unresolved`
     /// compiles against `Optional.none` and silently asks a different question.
-    case unresolved = 4
+    case unresolved = 5
 
     public static func < (a: Self, b: Self) -> Bool { a.rawValue < b.rawValue }
 }
@@ -436,6 +440,11 @@ public enum ReapScope: Sendable, Equatable {
     /// Only processes carrying a `CLAUDE_CODE_MESSAGING_SOCKET` naming the target. The
     /// rule for anything unattended, and the default, so reaching wider is deliberate.
     case stamped
+    /// Processes Claude itself started: the stamp, or descent from the Claude desktop app
+    /// inside this worktree. What a timer may take, because both answer "who started
+    /// this" and a bare path does not. It leaves alone what the person started themselves
+    /// in the same directory, which is what the stamp-only rule was protecting.
+    case startedByClaude
     /// Everything the cascade placed in this group, at whichever tier placed it. What a
     /// row's own Stop button acts on, because the row is the scope a person agreed to.
     case attributed

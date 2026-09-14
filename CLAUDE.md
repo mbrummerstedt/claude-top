@@ -40,14 +40,17 @@ Every attribution rule is testable against `Tests/Fixtures/load55-2026-09-10/` w
 touching the live machine.
 
 ```bash
-swift test                        # 311 tests, about 20 seconds
+swift test                        # 365 tests, about 20 seconds
 swift test --filter ReapSafety    # the filter matches the type name, not the @Suite name
 ```
 
 Fixture facts you can assert against, measured at capture time:
 
 - 662 processes, 44 carrying a `CLAUDE_CODE_MESSAGING_SOCKET` stamp, across 10 session PIDs
-- 6 more processes carry no stamp but sit in a worktree, which is why tier 3 exists
+- 6 more processes carry no stamp but sit in a worktree, which is why tier 3 exists.
+  All 6 descend from the Claude desktop app, so all 6 are `claudeLaunched` and none is
+  `worktreePath`: on a real machine the path-alone tier is empty, which is why refusing
+  it left the unattended reaper with nothing it could ever signal
 - 5 stamped session PIDs are absent from `agents.json`, with 27 surviving child
   processes between them. Those must resolve to `orphan:`, not to `system:`
 - those children plus their own unstamped descendants make 41 processes in 4 orphan groups
@@ -64,11 +67,13 @@ session A must select zero processes belonging to session B.
 
 **Never `SIGKILL` as an opening move.** `SIGTERM`, wait 5s, then escalate.
 
-**Unattended reaping is narrow by construction.** Whatever runs without a person watching
-it, which is `--auto-reap` and the SessionEnd hook, selects only processes carrying the
-reaping session's own env stamp. Never path matches, never ppid matches, never another
-session's stamp. `ReapScope.stamped` is that rule and it is the default, so reaching wider
-is always something a caller asked for by name.
+**Unattended reaping selects only what Claude started.** `--auto-reap` passes
+`ReapScope.startedByClaude`: a process carrying the reaping session's own env stamp, or one
+sitting in that worktree with the Claude desktop app above it in the process tree. Never a
+ppid walk, never another session's stamp, and never a bare path match, which cannot tell a
+dev server from the editor the person opened on the same directory. `ReapScope.stamped` is
+narrower still and stays the default, so reaching past it is always something a caller
+asked for by name.
 
 **A row's Stop button stops that row.** The attended paths, which are the app's rows and
 bulk button, `--reap`, and `--watch`, pass `ReapScope.attributed` and select every process
@@ -77,9 +82,9 @@ and lists what it holds before anything is pressed, so the row is the scope a pe
 agreed to, and a button that signals two thirds of what its row lists is a button nobody
 can read.
 
-**Neither scope widens membership.** A process is selected only if the cascade placed it
+**No scope widens membership.** A process is selected only if the cascade placed it
 in the target group, so no scope can reach into another session, a system family, or the
-unattributed bucket. Containers are compose `working_dir` only in both, never a
+unattributed bucket. Containers are compose `working_dir` only at every scope, never a
 Testcontainers cluster and never a tier-C unattributed one. Every kill is logged to
 `~/.claude/state/reap.log` with the reason it was selected. A `.claude-top-keep` file in a
 worktree exempts it entirely.

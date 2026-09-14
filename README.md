@@ -68,16 +68,24 @@ Better still, the stamp survives the session dying. On the machine this was buil
 processes were still running under sessions that had exited hours earlier, one of them for
 22 hours, each still naming the session that started it.
 
-Four tiers, first hit wins:
+Five tiers, first hit wins:
 
 1. **Env stamp.** The socket path names the spawning session. Survives reparenting and
    survives the session exiting.
 2. **Process tree.** A parent walk from live session roots, which catches anything
    re-exec'd through a shim.
-3. **Worktree path.** The working directory under `.claude/worktrees/<name>`, which
-   catches watchers that lost their environment but never left the directory.
-4. **Container labels.** Docker Compose `working_dir`, and Testcontainers clustered with
+3. **Claude-launched.** The working directory under `.claude/worktrees/<name>`, with the
+   Claude desktop app somewhere above it in the process tree. A command typed into the
+   app's own terminal inherits no stamp, because no agent spawned it, but the app is
+   still its ancestor.
+4. **Worktree path.** The working directory under `.claude/worktrees/<name>`, and nothing
+   more, which catches watchers that lost their environment but never left the directory.
+5. **Container labels.** Docker Compose `working_dir`, and Testcontainers clustered with
    the reaper that will clean them up.
+
+Three and four place a process in exactly the same group. They differ only in what is
+known about where it came from, and that is what decides whether something running
+unattended is allowed to signal it.
 
 Anything resolving to a worktree with no live session is an orphan. Anything resolving to
 nothing is reported as unattributed.
@@ -301,7 +309,7 @@ with no session behind it. That is remembered across runs, and
 - a quarantine of zero is refused rather than obeyed, since it removes the only thing
   making any of this safe
 
-On top of the rules for something running unattended: env stamp only, Compose
+On top of the rules for something running unattended: what Claude started only, Compose
 `working_dir` only, never a live session, never a Testcontainers cluster, never an
 unlabelled container, and `.claude-top-keep` exempts a worktree entirely. A run stops at most three worktrees, so
 any future mistake stays small enough to notice and recover from, and the backlog is
@@ -329,11 +337,13 @@ Both are narrow and both announce themselves. Neither is installed for you.
 Stopping the wrong thing kills work that was still running, so how far selection reaches
 depends on whether anybody is watching it happen.
 
-**Unattended**, which is `--auto-reap` and the SessionEnd hook, selects processes **only**
-by their own env stamp. Never by path, never by parent. A stamp names the session that
-started a process and goes on naming it after that session dies; a path says only that
-something never left a directory, and a parent says only that whatever started it had not
-either. Neither is enough for something acting while you are asleep.
+**Unattended**, which is `--auto-reap`, selects **only what Claude started**: a process
+carrying its own env stamp, or one sitting in the worktree with the Claude desktop app
+above it in the process tree. Never by a bare path, never by parent. A stamp names the
+session that started a process and goes on naming it after that session dies, and ancestry
+answers the same question for a command typed into the app's own terminal, which inherits
+no stamp because no agent spawned it. A bare path answers a different question: it says
+something never left a directory, which is as true of the editor you opened on it.
 
 **Attended**, which is a row's Stop button, the panel's bulk button, `--reap` and
 `--watch`, selects every process the cascade placed in that group, at whichever tier
@@ -351,7 +361,7 @@ Neither reaches further than the group it was pointed at:
 - Containers are selected **only** by a Compose `working_dir` matching that worktree.
 - Testcontainers clusters are never selected. Their own reaper handles them.
 - Unattributed containers are never selected by anything.
-- claude-top never selects its own processes, at either scope.
+- claude-top never selects its own processes, at any scope.
 - `SIGTERM`, wait 5 seconds, then escalate. Never `SIGKILL` as an opening move.
 - A `.claude-top-keep` file in a worktree exempts it entirely.
 - Every signal is appended to `~/.claude/state/reap.log` with the reason it was selected.

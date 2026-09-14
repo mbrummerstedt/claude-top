@@ -67,6 +67,8 @@ I/O and the logic have not been separated yet.
 Facts the reference capture is pinned to, which your change should not silently alter:
 
 - 662 processes, 44 carrying a session stamp, across 10 session PIDs
+- 6 more carry no stamp but sit in a worktree, and all 6 descend from the Claude desktop
+  app, so the path-alone tier is empty on a real machine
 - 5 of those session PIDs are gone, with 27 stamped children still running between them
 - those children plus their own unstamped descendants make 41 processes in 4 orphan groups
 - 13 containers: 7 Compose, 5 Testcontainers across 3 clusters, 1 with no labels at all
@@ -86,10 +88,11 @@ SwiftUI, Charts. Raise it first if you think you need a package.
 **Shelling out without a timeout.** `docker stats` returned dashes for every column during
 the reference capture. Every external command has a deadline and degrades to "unknown".
 
-**Widening an unattended reap.** A timer with nobody reading its list selects processes by
-env stamp and by nothing else. Not a path match, not a parent walk. Both of those say
-something weaker than a stamp does, and weaker is not enough for something that acts while
-you are asleep. An attended stop is the other case and takes the whole group it is shown,
+**Widening an unattended reap.** A timer with nobody reading its list selects only what
+Claude started: the env stamp, or the desktop app above it in the process tree. Not a bare
+path match, not a parent walk. A path says a process never left a directory, which is as
+true of an editor as of a dev server, and that is not enough for something acting while you
+are asleep. An attended stop is the other case and takes the whole group it is shown,
 which `ReapScope` carries; adding a caller that reaches wide without a person in front of
 it is the thing to stop.
 

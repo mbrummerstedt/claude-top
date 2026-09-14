@@ -417,6 +417,7 @@ extension AttributionTier {
         switch self {
         case .envStamp: return "envStamp"
         case .processTree: return "processTree"
+        case .claudeLaunched: return "claudeLaunched"
         case .worktreePath: return "worktreePath"
         case .containerLabel: return "containerLabel"
         case .unresolved: return "unresolved"

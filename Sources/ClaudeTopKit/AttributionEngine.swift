@@ -15,8 +15,12 @@ public enum AttributionEngine {
     /// Cascade, first hit wins:
     ///   1. env stamp        — `CLAUDE_CODE_MESSAGING_SOCKET` names the spawning session
     ///   2. process tree     — ppid walk from a live session root
-    ///   3. worktree path    — PWD, or vnode path, under `.claude/worktrees/`
-    ///   4. container label  — compose `working_dir`, or testcontainers `session-id`
+    ///   3. Claude-launched  — PWD under `.claude/worktrees/`, and the desktop app above it
+    ///   4. worktree path    — PWD, or vnode path, under `.claude/worktrees/`, and no more
+    ///   5. container label  — compose `working_dir`, or testcontainers `session-id`
+    ///
+    /// Three and four place a process identically and differ only in what is known about
+    /// where it came from, which is what decides whether a timer may signal it.
     ///
     /// A stamped process whose session PID is absent from `sessions` is an orphan, not a
     /// system process. That is the case that matters: on the reference fixture, five dead
@@ -217,13 +221,22 @@ public enum AttributionEngine {
 
         // Tier 3. Working directory. Catches the vite and tsx watchers that carry neither
         // a stamp nor a live ancestor but never left the worktree they were started in.
+        //
+        // Split on where the process came from. The directory places it either way, so the
+        // key is the same; what differs is whether anything says Claude started it. A
+        // command typed into the desktop app's own terminal is launched through the app
+        // and inherits no stamp, so the path is all it has, and the path alone cannot tell
+        // it from the editor the person opened on the same worktree. Its ancestry can.
+        let claudeLaunched = descendantsOfClaudeDesktop(processes: processes, parents: parents)
         for proc in processes where out[proc.pid] == nil {
             guard let pwd = environments[proc.pid]?.pwd,
                   let id = worktreeID(forPath: pwd) else { continue }
             let key: AttributionKey = liveByWorktree[id]
                 .map { .session(uuid: $0.sessionID) }
                 ?? .orphan(repo: id.repo, worktree: id.worktree)
-            out[proc.pid] = ProcessAttribution(pid: proc.pid, key: key, tier: .worktreePath)
+            out[proc.pid] = ProcessAttribution(
+                pid: proc.pid, key: key,
+                tier: claudeLaunched.contains(proc.pid) ? .claudeLaunched : .worktreePath)
         }
 
         // Tier 4. Everything the cascade could not place is still reported, so the totals
@@ -283,6 +296,42 @@ public enum AttributionEngine {
                 ?? .orphan(repo: "", worktree: "session-\(spawner)")
         }
         return keys
+    }
+
+    /// Every process with the Claude desktop app somewhere above it.
+    ///
+    /// Computed once for the whole table rather than walked per process: on a machine with
+    /// fifteen sessions the app is the root of a few dozen chains, and walking each one
+    /// separately re-reads the same ancestors over and over.
+    ///
+    /// The app is recognised by its bundle path, the same rule `systemFamily` uses, so a
+    /// process merely mentioning Claude in an argument is not mistaken for one the app
+    /// started.
+    private static func descendantsOfClaudeDesktop(
+        processes: [ProcessSample], parents: [Int32: Int32]
+    ) -> Set<Int32> {
+        let roots = Set(processes.filter { systemFamily(forCommand: $0.command) == .claudeDesktop }
+                                 .map(\.pid))
+        guard !roots.isEmpty else { return [] }
+
+        var descends: Set<Int32> = roots
+        for proc in processes where !descends.contains(proc.pid) {
+            var chain: [Int32] = []
+            var current = proc.pid
+            var seen: Set<Int32> = []
+            // The process table is sampled while it mutates, so a cycle can be observed
+            // even though it cannot exist.
+            while seen.insert(current).inserted, current > 1 {
+                if descends.contains(current) {
+                    descends.formUnion(chain)
+                    break
+                }
+                chain.append(current)
+                guard let parent = parents[current] else { break }
+                current = parent
+            }
+        }
+        return descends.subtracting(roots)
     }
 
     /// Nearest placed ancestor, or the session whose root process is an ancestor.
@@ -534,6 +583,9 @@ public enum AttributionEngine {
         case .processTree:
             guard scope == .attributed else { return nil }
             return "process tree leads here, no stamp of its own"
+        case .claudeLaunched:
+            guard scope != .stamped, let pwd = environment?.pwd else { return nil }
+            return "the Claude desktop app started it, in \(pwd)"
         case .worktreePath:
             guard scope == .attributed, let pwd = environment?.pwd else { return nil }
             return "working directory is \(pwd)"
