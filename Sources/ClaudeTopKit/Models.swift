@@ -426,6 +426,21 @@ public struct ReapComposeTarget: Sendable, Equatable {
     }
 }
 
+/// How far a reap may reach into a group.
+///
+/// The two callers are not the same caller. A timer firing on a LaunchAgent has nobody
+/// reading the list, so it gets the stamp and nothing else. A person looking at a row that
+/// names a worktree and says what it is holding has already read the list, and the row is
+/// what they agreed to.
+public enum ReapScope: Sendable, Equatable {
+    /// Only processes carrying a `CLAUDE_CODE_MESSAGING_SOCKET` naming the target. The
+    /// rule for anything unattended, and the default, so reaching wider is deliberate.
+    case stamped
+    /// Everything the cascade placed in this group, at whichever tier placed it. What a
+    /// row's own Stop button acts on, because the row is the scope a person agreed to.
+    case attributed
+}
+
 /// Deliberately inert. Producing the plan touches nothing; a caller decides whether to
 /// act on it, and `--dry-run` prints one without acting.
 public enum ReapRefusal: Sendable, Equatable {
