@@ -28,8 +28,9 @@ extension Renderer {
         guard !proposals.isEmpty else {
             return box(["Nothing to stop.",
                         "",
-                        "No processes carry the stamp of a session that has exited, and no",
-                        "Compose project belongs to a worktree without one."],
+                        "Every orphaned worktree is empty, exempted by a .claude-top-keep",
+                        "file, or holding only things this tool will not signal: another",
+                        "session's work, a Testcontainers cluster, an unlabelled container."],
                        footer: "any key  back", width: width, height: height)
         }
 
@@ -83,6 +84,60 @@ extension Renderer {
         }
 
         return box(body, footer: footer, method: method, width: width, height: height)
+    }
+
+    /// One line about a stop that did not do what pressing the button implied, or nil
+    /// when it did.
+    ///
+    /// The panel reports a stop by the row disappearing, which is the right report when
+    /// something was stopped and says nothing at all when nothing was. That is how a
+    /// button that could never act on its row came to look like a button that was merely
+    /// slow: a spinner, then the button again, and no way to tell which had happened.
+    ///
+    /// Silence stays the answer for the case it was right for. Everything else gets a
+    /// sentence.
+    public static func stopReport(label: String, plan: ReapPlan,
+                                  outcome: ReapOutcome?) -> String? {
+        if let refusal = plan.refusal {
+            switch refusal {
+            case .keepFile:
+                return "\(label): left alone, a .claude-top-keep file exempts this worktree."
+            case .rosterNotLive:
+                return "\(label): not stopped, the session list could not be read just now."
+            }
+        }
+
+        guard !plan.isEmpty else {
+            return "\(label): nothing in it can be stopped. Nothing it holds is a process "
+                 + "this tool will signal or a Compose project of its own."
+        }
+
+        guard let outcome else {
+            return "\(label): nothing was stopped."
+        }
+
+        if !outcome.survived.isEmpty {
+            let pids = outcome.survived.map(String.init).joined(separator: ", ")
+            return "\(label): \(outcome.survived.count) ignored both signals: \(pids)."
+        }
+
+        // A target that took no signal at all. The cause is not knowable from here: a
+        // process may have exited between the reading and the signal, or belong to
+        // another user, and `kill` reports both the same way. Saying which would be
+        // guessing, and a guess is worse here than the plain fact.
+        var missed: [String] = []
+        if !plan.processes.isEmpty && outcome.terminated.isEmpty {
+            missed.append("none of its \(plan.processes.count) processes took a signal")
+        }
+        if !plan.containers.isEmpty && outcome.containersStopped.isEmpty {
+            missed.append("docker did not stop its \(plan.containers.count) "
+                          + "container\(plan.containers.count == 1 ? "" : "s")")
+        }
+        guard missed.isEmpty else {
+            return "\(label): " + missed.joined(separator: ", and ") + "."
+        }
+
+        return nil
     }
 
     /// Why a reap is not going to happen, said plainly.

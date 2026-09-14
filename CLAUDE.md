@@ -64,11 +64,25 @@ session A must select zero processes belonging to session B.
 
 **Never `SIGKILL` as an opening move.** `SIGTERM`, wait 5s, then escalate.
 
-**Reaping is narrow by construction.** Only processes carrying the reaping session's own
-env stamp, only compose projects whose `working_dir` label is that session's own worktree.
-Never path matches, never ppid matches, never another session's stamp, never a tier-C
-unattributed container. Every kill is logged to `~/.claude/state/reap.log` with the reason
-it was selected. A `.claude-top-keep` file in a worktree exempts it entirely.
+**Unattended reaping is narrow by construction.** Whatever runs without a person watching
+it, which is `--auto-reap` and the SessionEnd hook, selects only processes carrying the
+reaping session's own env stamp. Never path matches, never ppid matches, never another
+session's stamp. `ReapScope.stamped` is that rule and it is the default, so reaching wider
+is always something a caller asked for by name.
+
+**A row's Stop button stops that row.** The attended paths, which are the app's rows and
+bulk button, `--reap`, and `--watch`, pass `ReapScope.attributed` and select every process
+the cascade placed in that group, at whichever tier placed it. The row names the worktree
+and lists what it holds before anything is pressed, so the row is the scope a person
+agreed to, and a button that signals two thirds of what its row lists is a button nobody
+can read.
+
+**Neither scope widens membership.** A process is selected only if the cascade placed it
+in the target group, so no scope can reach into another session, a system family, or the
+unattributed bucket. Containers are compose `working_dir` only in both, never a
+Testcontainers cluster and never a tier-C unattributed one. Every kill is logged to
+`~/.claude/state/reap.log` with the reason it was selected. A `.claude-top-keep` file in a
+worktree exempts it entirely.
 
 **Do not run destructive commands on the machine you are developing on.** No `rm -rf`, no
 `git clean`, no `git branch -D`, no `kill`. Print the full absolute-path command in a bash

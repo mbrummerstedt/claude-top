@@ -301,9 +301,9 @@ with no session behind it. That is remembered across runs, and
 - a quarantine of zero is refused rather than obeyed, since it removes the only thing
   making any of this safe
 
-On top of the selection rules that apply everywhere: env stamp only, Compose `working_dir`
-only, never a live session, never a Testcontainers cluster, never an unlabelled container,
-and `.claude-top-keep` exempts a worktree entirely. A run stops at most three worktrees, so
+On top of the rules for something running unattended: env stamp only, Compose
+`working_dir` only, never a live session, never a Testcontainers cluster, never an
+unlabelled container, and `.claude-top-keep` exempts a worktree entirely. A run stops at most three worktrees, so
 any future mistake stays small enough to notice and recover from, and the backlog is
 worked through over successive runs.
 
@@ -324,15 +324,34 @@ and can saturate a machine by itself.
 
 Both are narrow and both announce themselves. Neither is installed for you.
 
-## Reaping is narrow on purpose
+## What a stop is allowed to reach
 
-Stopping the wrong thing kills work that was still running, so selection is deliberately
-too narrow rather than nearly right:
+Stopping the wrong thing kills work that was still running, so how far selection reaches
+depends on whether anybody is watching it happen.
 
-- Processes are selected **only** by their own env stamp. Never by path, never by parent.
+**Unattended**, which is `--auto-reap` and the SessionEnd hook, selects processes **only**
+by their own env stamp. Never by path, never by parent. A stamp names the session that
+started a process and goes on naming it after that session dies; a path says only that
+something never left a directory, and a parent says only that whatever started it had not
+either. Neither is enough for something acting while you are asleep.
+
+**Attended**, which is a row's Stop button, the panel's bulk button, `--reap` and
+`--watch`, selects every process the cascade placed in that group, at whichever tier
+placed it. The row names the worktree and lists what it is holding before anything is
+pressed. This is what makes the leftovers of a shell you opened yourself stoppable at all:
+nothing you start by hand carries a stamp, so the narrow rule could see those processes,
+attribute them, and never touch them.
+
+Neither reaches further than the group it was pointed at:
+
+- A process belongs to a group because the cascade placed it there. Neither scope can
+  cross into a live session, a system family, or the unattributed bucket.
+- A process sitting in a worktree belongs to whichever session holds that worktree **now**,
+  so stopping an orphan never touches a session that took its worktree over.
 - Containers are selected **only** by a Compose `working_dir` matching that worktree.
 - Testcontainers clusters are never selected. Their own reaper handles them.
 - Unattributed containers are never selected by anything.
+- claude-top never selects its own processes, at either scope.
 - `SIGTERM`, wait 5 seconds, then escalate. Never `SIGKILL` as an opening move.
 - A `.claude-top-keep` file in a worktree exempts it entirely.
 - Every signal is appended to `~/.claude/state/reap.log` with the reason it was selected.

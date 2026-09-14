@@ -86,10 +86,17 @@ SwiftUI, Charts. Raise it first if you think you need a package.
 **Shelling out without a timeout.** `docker stats` returned dashes for every column during
 the reference capture. Every external command has a deadline and degrades to "unknown".
 
-**Widening a reap.** Selection is by env stamp for processes and by the Compose
-`working_dir` label for containers, and by nothing else. Not a path match, not a parent
-walk. Both of those could cross into a session that is still working. The narrowness costs
-something real, and it is worth it.
+**Widening an unattended reap.** A timer with nobody reading its list selects processes by
+env stamp and by nothing else. Not a path match, not a parent walk. Both of those say
+something weaker than a stamp does, and weaker is not enough for something that acts while
+you are asleep. An attended stop is the other case and takes the whole group it is shown,
+which `ReapScope` carries; adding a caller that reaches wide without a person in front of
+it is the thing to stop.
+
+**Letting a stop end in silence.** A stop that signalled nothing has to say so. The panel
+reports success by the row disappearing, so a row that stays with nothing beside it reads
+as a button that does not work, which is exactly what the silent `continue` on an empty
+plan turned it into.
 
 **`SIGKILL` as an opening move.** `SIGTERM`, wait, then escalate.
 

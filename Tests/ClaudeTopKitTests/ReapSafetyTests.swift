@@ -5,10 +5,15 @@ import Foundation
 /// The most important tests in this repository.
 ///
 /// Everything else being wrong produces a misleading number. This being wrong kills work
-/// that was still running. Selection is by env stamp for processes and by the compose
-/// `working_dir` label for containers, and by nothing else: no path matching, no ppid
-/// walking, no name parsing. Each of those could cross into a session that is still
-/// working, and none of them is worth the reach it buys.
+/// that was still running. What is held here is the rule for anything acting with nobody
+/// watching it: selection by env stamp for processes and by the compose `working_dir`
+/// label for containers, and by nothing else. No path matching, no ppid walking, no name
+/// parsing. Each of those says something weaker than a stamp does, and weaker is not
+/// enough for a timer.
+///
+/// A person pressing Stop on a row they have read is the other case, and `AttendedStopTests`
+/// holds that one. Every test here builds its plan at the default scope, so anything that
+/// starts passing a wider one has to say so here first.
 @Suite("Reap safety")
 struct ReapSafetyTests {
 
@@ -141,10 +146,10 @@ struct ReapSafetyTests {
 
     // MARK: - selection is by stamp, never by anything else
 
-    @Test("A process sitting in the worktree without a stamp is never selected")
+    @Test("Unattended, a process sitting in the worktree without a stamp is never selected")
     func neverSelectsByPath() {
         // It might belong to the session. It might be the person's own editor or shell.
-        // A reap does not get to guess, so this one is reported and left alone.
+        // A timer does not get to guess, so this one is reported and left alone.
         let processes = [proc(500)]
         let environments = [env(500, pwd: worktreeA)]
         let p = plan(for: .orphan(repo: "reader-app", worktree: "terms-page-63c477"),
@@ -152,7 +157,7 @@ struct ReapSafetyTests {
         #expect(p.processes.isEmpty)
     }
 
-    @Test("A child of a selected process is not itself selected")
+    @Test("Unattended, a child of a selected process is not itself selected")
     func neverSelectsByParent() {
         // Signalling the parent is what stops the children: a Postgres postmaster shuts
         // its workers down cleanly on SIGTERM. Walking the tree to signal each one both

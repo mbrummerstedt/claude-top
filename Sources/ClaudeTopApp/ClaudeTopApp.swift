@@ -67,7 +67,10 @@ final class ResourceModel: ObservableObject {
     /// rather than by replacing the panel: a view that changes under you loses your place
     /// and hides everything else you were reading.
     @Published private(set) var stopping: Set<AttributionKey> = []
-    @Published private(set) var lastSurvivors: [Int32] = []
+    /// What the last stop did that pressing the button did not already imply. Empty when
+    /// it did exactly what the row said it would, because then the row is gone and that is
+    /// the report.
+    @Published private(set) var lastReports: [String] = []
     /// Asked for but not yet reached. Separate from `stopping` only in that `stopping` is
     /// what the rows read, and a row shows a spinner from the click rather than from its
     /// turn.
@@ -245,7 +248,7 @@ final class ResourceModel: ObservableObject {
             let plan = AttributionEngine.reapPlan(
                 for: group.key, processes: sample.processes,
                 environments: sample.environments, containers: sample.containers,
-                roster: sample.roster, keepMarkedWorktrees: keep)
+                roster: sample.roster, keepMarkedWorktrees: keep, scope: .attributed)
             guard !plan.isEmpty else { return nil }
             return ReapProposal(plan: plan, label: group.label,
                                 age: group.oldestProcessStartedAt.map {
@@ -268,6 +271,9 @@ final class ResourceModel: ObservableObject {
     /// because there the scope is not all visible at once.
     func requestStop(_ key: AttributionKey) {
         guard !stopping.contains(key) else { return }
+        // The last stop's report belongs to the last stop. Leaving it beside a fresh
+        // spinner invites reading it as this one's answer.
+        lastReports = []
         stopping.insert(key)
         queued.append(key)
         startWorker()
@@ -311,28 +317,42 @@ final class ResourceModel: ObservableObject {
             }
 
             let keep = Reaper.keepMarkedWorktrees(in: sample)
-            var survived: [Int32] = []
+            var reports: [String] = []
 
             for key in batch {
                 defer { stopping.remove(key) }
+                // Gone between the click and this reading. The row is about to disappear,
+                // which is the whole answer.
                 guard let group = snapshot.orphans.first(where: { $0.key == key }) else {
                     continue
                 }
                 let plan = AttributionEngine.reapPlan(
                     for: group.key, processes: sample.processes,
                     environments: sample.environments, containers: sample.containers,
-                    roster: sample.roster, keepMarkedWorktrees: keep)
-                guard !plan.isEmpty else { continue }
+                    roster: sample.roster, keepMarkedWorktrees: keep, scope: .attributed)
+
+                // An empty plan used to be skipped in silence, which is what made a button
+                // that could not act on its row look like one that was merely slow.
+                guard !plan.isEmpty else {
+                    if let report = Renderer.stopReport(label: group.label, plan: plan,
+                                                        outcome: nil) {
+                        reports.append(report)
+                    }
+                    continue
+                }
 
                 let outcome = await Task.detached(priority: .userInitiated) {
                     Reaper().execute(plan)
                 }.value
-                survived += outcome.survived
+                if let report = Renderer.stopReport(label: group.label, plan: plan,
+                                                    outcome: outcome) {
+                    reports.append(report)
+                }
             }
 
-            // Only worth surfacing when something refused to go. A success needs no
-            // notice: the row disappearing is the notice.
-            lastSurvivors = survived.isEmpty ? [] : survived
+            // Only what a success would not have said for itself. A row that disappeared
+            // needs no sentence; a row that stayed needs one.
+            lastReports = reports
             await refresh()
         }
     }
@@ -346,17 +366,21 @@ final class ResourceModel: ObservableObject {
     /// spinners in place rather than the whole view becoming a progress screen.
     func carryOut(_ proposals: [ReapProposal]) async {
         state = .overview
+        lastReports = []
         stopping.formUnion(proposals.map(\.plan.key))
 
-        var survived: [Int32] = []
+        var reports: [String] = []
         for proposal in proposals {
             defer { stopping.remove(proposal.plan.key) }
             let outcome = await Task.detached(priority: .userInitiated) {
                 Reaper().execute(proposal.plan)
             }.value
-            survived += outcome.survived
+            if let report = Renderer.stopReport(label: proposal.label, plan: proposal.plan,
+                                                outcome: outcome) {
+                reports.append(report)
+            }
         }
-        lastSurvivors = survived
+        lastReports = reports
         await refresh()
     }
 }
@@ -402,14 +426,11 @@ struct Overview: View {
                 Abandoned(snapshot: snapshot, model: model)
             }
 
-            if !model.lastSurvivors.isEmpty {
-                // Only shown when something refused both signals. A success needs no
-                // notice: the row disappearing is the notice.
-                Text("\(model.lastSurvivors.count) process"
-                     + (model.lastSurvivors.count == 1 ? "" : "es")
-                     + " survived both signals: "
-                     + model.lastSurvivors.map(String.init).joined(separator: ", "))
-                    .font(.caption2).foregroundStyle(.orange)
+            // What the last stop could not do, said where the row it refers to was. A
+            // stop that did what the row promised leaves nothing here.
+            ForEach(Array(model.lastReports.enumerated()), id: \.offset) { _, report in
+                Text(report).font(.caption2).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Divider()
@@ -690,8 +711,10 @@ struct Confirm: View {
     var body: some View {
         if proposals.isEmpty {
             Message(title: "Nothing to stop",
-                    detail: "No processes carry the stamp of a session that has exited, "
-                          + "and no Compose project belongs to a worktree without one.",
+                    detail: "Every orphaned worktree is empty, exempted by a "
+                          + ".claude-top-keep file, or holding only things this tool will "
+                          + "not signal: another session's work, a Testcontainers cluster, "
+                          + "an unlabelled container.",
                     model: model)
         } else {
             Text("Stop \(processes) processes"

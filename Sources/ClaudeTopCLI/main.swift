@@ -323,7 +323,8 @@ if flag("--reap") {
         AttributionEngine.reapPlan(
             for: group.key, processes: sample.processes, environments: sample.environments,
             containers: sample.containers, roster: sample.roster,
-            keepMarkedWorktrees: Reaper.keepMarkedWorktrees(in: sample))
+            keepMarkedWorktrees: Reaper.keepMarkedWorktrees(in: sample),
+            scope: .attributed)
     }
 
     // Said plainly rather than reported as "nothing found". A roster that could not be
@@ -350,7 +351,8 @@ if flag("--reap") {
     }
 
     guard !actionable.isEmpty else {
-        print("nothing to reap: no orphaned processes carrying a dead session's stamp")
+        print("nothing to reap: every orphaned worktree is empty, exempted by a "
+              + ".claude-top-keep file, or holding only things this tool will not signal")
         exit(0)
     }
 

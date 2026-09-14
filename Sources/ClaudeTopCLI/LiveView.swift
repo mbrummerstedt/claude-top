@@ -135,7 +135,7 @@ enum LiveView {
             let plan = AttributionEngine.reapPlan(
                 for: group.key, processes: sample.processes,
                 environments: sample.environments, containers: sample.containers,
-                roster: roster, keepMarkedWorktrees: keep)
+                roster: roster, keepMarkedWorktrees: keep, scope: .attributed)
             guard !plan.isEmpty else { return nil }
             return ReapProposal(
                 plan: plan, label: group.label,

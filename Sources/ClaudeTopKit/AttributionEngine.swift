@@ -440,7 +440,8 @@ public enum AttributionEngine {
         environments: [Int32: ProcessEnvironment],
         containers: [ContainerInfo],
         roster: Roster,
-        keepMarkedWorktrees: Set<String> = []
+        keepMarkedWorktrees: Set<String> = [],
+        scope: ReapScope = .stamped
     ) -> ReapPlan {
         // Nothing is stopped on a roster that was not read just now. A failed read used
         // to look exactly like "no sessions are running", which resolved every live
@@ -472,25 +473,26 @@ public enum AttributionEngine {
         let attribution = resolveProcesses(processes: processes, environments: environments,
                                            sessions: sessions)
 
-        // Env stamp only. A process resolved by its path might be the person's own editor
-        // sitting in the worktree, and one resolved by its parent might have been adopted
-        // from somewhere else entirely. Neither is a good enough reason to signal it.
+        // What counts as evidence depends on who is asking, which is what `scope` carries.
+        // Membership does not: a process is selected only if the cascade put it in this
+        // group, so neither scope can reach into another session at any tier.
         //
-        // The narrowness is deliberate and it costs something: unstamped children are not
-        // signalled directly. In practice signalling the parent is what stops them, and a
-        // Postgres postmaster shuts its workers down more cleanly than anything reaching
-        // past it could.
+        // Reaching wide gives up something the narrow rule had. Signalling only a parent
+        // let a Postgres postmaster shut its own workers down, which is tidier than
+        // reaching past it to each one. It also meant a parent that had to be escalated to
+        // `SIGKILL` left its children running, since a kill propagates to nothing, and
+        // that is how a worktree stays alive after being stopped. A backend taking a
+        // `SIGTERM` of its own is what `pg_terminate_backend` sends it anyway.
         var processTargets: [ReapTarget] = []
         for proc in processes {
             guard let placed = attribution[proc.pid],
                   placed.key == target,
-                  placed.tier == .envStamp,
                   !isOwnMachinery(proc.command),
-                  let spawner = environments[proc.pid]?.spawningSessionPID
+                  let reason = selectionReason(placed, scope: scope,
+                                               environment: environments[proc.pid])
             else { continue }
-            processTargets.append(ReapTarget(
-                pid: proc.pid, command: proc.command,
-                reason: "CLAUDE_CODE_MESSAGING_SOCKET names session \(spawner)"))
+            processTargets.append(ReapTarget(pid: proc.pid, command: proc.command,
+                                             reason: reason))
         }
 
         // Compose label only. A testcontainers cluster has its own reaper and racing it
@@ -507,6 +509,37 @@ public enum AttributionEngine {
 
         return ReapPlan(key: target, processes: processTargets.sorted { $0.pid < $1.pid },
                         containers: containerTargets.sorted { $0.containerID < $1.containerID })
+    }
+
+    /// Why this process is eligible, or nil when it is not.
+    ///
+    /// The string is written to `~/.claude/state/reap.log` beside the pid, where it is the
+    /// only record of what the evidence was. A reap is audited afterwards by reading these
+    /// lines, so each one names the rule that selected the process rather than restating
+    /// that it was selected.
+    ///
+    /// The stamp is the only evidence a timer gets. It survives reparenting and it
+    /// survives the session dying, which is exactly when the other two stop being able to
+    /// help. The other two say something weaker: a path says a process never left the
+    /// worktree, a parent says it was started by something that had not either. Weaker is
+    /// still evidence when a person has the row in front of them, and refusing it there
+    /// left a whole class of leftovers, the ones a person starts in their own shell rather
+    /// than through an agent, with no way to be stopped at all.
+    private static func selectionReason(_ placed: ProcessAttribution, scope: ReapScope,
+                                        environment: ProcessEnvironment?) -> String? {
+        switch placed.tier {
+        case .envStamp:
+            guard let spawner = environment?.spawningSessionPID else { return nil }
+            return "CLAUDE_CODE_MESSAGING_SOCKET names session \(spawner)"
+        case .processTree:
+            guard scope == .attributed else { return nil }
+            return "process tree leads here, no stamp of its own"
+        case .worktreePath:
+            guard scope == .attributed, let pwd = environment?.pwd else { return nil }
+            return "working directory is \(pwd)"
+        case .containerLabel, .unresolved:
+            return nil
+        }
     }
 
     /// The worktree a key owns, when it owns one. An orphan keyed only by its dead
