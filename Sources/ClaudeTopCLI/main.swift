@@ -41,8 +41,9 @@ USAGE
       --yes                     skip the confirmation, for scripts that already decided
 
 ATTRIBUTION
-  Four tiers, first hit wins: the CLAUDE_CODE_MESSAGING_SOCKET stamp, then the process
-  tree, then the worktree path, then Docker Compose and Testcontainers labels. Anything
+  Five tiers, first hit wins: the CLAUDE_CODE_MESSAGING_SOCKET stamp, then the process
+  tree, then a worktree path with the Claude desktop app above it, then a worktree path
+  alone, then Docker Compose and Testcontainers labels. Anything
   resolving to a worktree with no live session is an orphan. Anything resolving to
   nothing is reported as unattributed rather than guessed at.
 
@@ -260,7 +261,8 @@ if flag("--auto-reap") {
     let plans = eligible.map { group in
         (group, AttributionEngine.reapPlan(
             for: group.key, processes: sample.processes, environments: sample.environments,
-            containers: sample.containers, roster: sample.roster, keepMarkedWorktrees: keep))
+            containers: sample.containers, roster: sample.roster, keepMarkedWorktrees: keep,
+            scope: .startedByClaude))
     }.filter { !$0.1.isEmpty }
 
     for (group, plan) in plans {
