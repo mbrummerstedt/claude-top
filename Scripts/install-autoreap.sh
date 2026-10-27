@@ -7,8 +7,9 @@
 #
 # What it will stop: processes carrying the env stamp of a Claude session that has exited,
 # and Compose projects belonging to that session's worktree, and only once that worktree
-# has been *continuously observed* with no session for the quarantine period. Nothing else
-# is ever a candidate. Live sessions, Testcontainers clusters, unlabelled containers and
+# has been *continuously observed* with no session for the quarantine period. A Compose
+# project whose worktree has been deleted from disk is removed on the next run instead,
+# since nothing can come back to it. Nothing else is ever a candidate. Live sessions, Testcontainers clusters, unlabelled containers and
 # anything under a `.claude-top-keep` file are all excluded by construction.
 #
 # Touches exactly one file: ~/Library/LaunchAgents/com.claudetop.autoreap.plist

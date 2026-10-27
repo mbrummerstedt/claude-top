@@ -171,4 +171,82 @@ struct AutoReapTests {
         // The longest abandoned first, so repeated runs work through the backlog.
         #expect(eligible.first?.key == orphan("w0"))
     }
+
+    // MARK: - stacks whose worktree has been deleted
+
+    /// A repository on disk with its `.claude/worktrees/` directory, and the path a compose
+    /// stack in worktree `name` would carry as its `working_dir`.
+    private func repository() throws -> URL {
+        let repo = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("claude-top-autoreap-" + UUID().uuidString)
+            .appendingPathComponent("metrics-book")
+        try FileManager.default.createDirectory(
+            at: repo.appendingPathComponent(".claude/worktrees"), withIntermediateDirectories: true)
+        return repo
+    }
+
+    private func stackPlan(in repo: URL, worktree: String) -> ReapPlan {
+        let workingDir = repo.appendingPathComponent(".claude/worktrees/\(worktree)/apps/api/test").path
+        return ReapPlan(
+            key: .orphan(repo: "metrics-book", worktree: worktree),
+            processes: [ReapTarget(pid: 500, command: "/usr/bin/node",
+                                   reason: "stamp names session 100")],
+            containers: ["postgres", "cerbos"].map {
+                ReapComposeTarget(containerID: "id-\($0)", name: "mb_api_test-\($0)-1",
+                                  workingDirectory: workingDir,
+                                  reason: "compose working_dir is metrics-book::\(worktree)")
+            })
+    }
+
+    @Test("A stack whose worktree was deleted is removed without waiting")
+    func deletedWorktreeSkipsQuarantine() throws {
+        // A subagent's worktree is deleted when it finishes and its test stack keeps
+        // running. Nothing can start a session there again and compose cannot reuse the
+        // stack, so eight hours of waiting protects nothing.
+        let repo = try repository()
+        defer { try? FileManager.default.removeItem(at: repo.deletingLastPathComponent()) }
+
+        let plan = AutoReap.plan(stackPlan(in: repo, worktree: "agent-a1"), quarantineElapsed: false)
+        #expect(plan.containers.map(\.containerID) == ["id-postgres", "id-cerbos"])
+        #expect(plan.containers.allSatisfy { $0.remove })
+        // The directory says the stack is finished with. It says nothing about whether a
+        // process that started there has finished its work, so processes still wait.
+        #expect(plan.processes.isEmpty)
+    }
+
+    @Test("A stack whose worktree still exists waits for the quarantine")
+    func existingWorktreeWaits() throws {
+        let repo = try repository()
+        defer { try? FileManager.default.removeItem(at: repo.deletingLastPathComponent()) }
+        try FileManager.default.createDirectory(
+            at: repo.appendingPathComponent(".claude/worktrees/agent-a1/apps/api/test"),
+            withIntermediateDirectories: true)
+
+        let stack = stackPlan(in: repo, worktree: "agent-a1")
+        #expect(AutoReap.plan(stack, quarantineElapsed: false).isEmpty)
+        #expect(AutoReap.plan(stack, quarantineElapsed: true) == stack)
+    }
+
+    @Test("A disk that is not there is not a deleted worktree")
+    func missingParentIsNotDeletion() throws {
+        // An unmounted volume fails a stat exactly like a deleted directory. Only a
+        // worktree missing from a `.claude/worktrees/` that is still there counts.
+        let repo = try repository()
+        defer { try? FileManager.default.removeItem(at: repo.deletingLastPathComponent()) }
+        try FileManager.default.removeItem(at: repo.appendingPathComponent(".claude/worktrees"))
+
+        #expect(AutoReap.plan(stackPlan(in: repo, worktree: "agent-a1"),
+                              quarantineElapsed: false).isEmpty)
+    }
+
+    @Test("Past the quarantine, a deleted worktree's processes are signalled and its stack removed")
+    func deletedWorktreePastQuarantine() throws {
+        let repo = try repository()
+        defer { try? FileManager.default.removeItem(at: repo.deletingLastPathComponent()) }
+
+        let plan = AutoReap.plan(stackPlan(in: repo, worktree: "agent-a1"), quarantineElapsed: true)
+        #expect(plan.processes.map(\.pid) == [500])
+        #expect(plan.containers.count == 2)
+        #expect(plan.containers.allSatisfy { $0.remove })
+    }
 }

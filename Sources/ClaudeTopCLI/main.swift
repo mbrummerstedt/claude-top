@@ -34,7 +34,8 @@ USAGE
   claude-top --statusline       one line for a shell prompt
   claude-top --hook <event>     pre-tool-use or session-start; see docs/HOOKS.md
   claude-top --reap             stop the leftovers of sessions that are gone
-  claude-top --auto-reap        unattended; only worktrees orphaned past a quarantine
+  claude-top --auto-reap        unattended; only worktrees orphaned past a quarantine,
+                                plus Compose stacks whose worktree was deleted
       --older-than <duration>   how long orphaned before eligible (default 8h)
       --limit <n>               most groups one run may stop (default 3)
       --dry-run                 show what would be stopped and stop nothing
@@ -249,26 +250,36 @@ if flag("--auto-reap") {
     guard let store = openStore() else { fail("cannot open \(ResourceStore.defaultPath)") }
     try? store.recordOrphans(snapshot.orphans.map(\.key), at: sample.processesReadAt)
 
-    let eligible = AutoReap.eligible(orphans: snapshot.orphans,
-                                     orphanedSince: store.orphanedSince(),
-                                     quarantine: quarantine, now: Date(), limit: limit)
-    guard !eligible.isEmpty else {
-        print("nothing orphaned for longer than \(Int(quarantine / 3600))h")
+    let orphanedSince = store.orphanedSince()
+    let eligible = Set(AutoReap.eligible(orphans: snapshot.orphans,
+                                         orphanedSince: orphanedSince,
+                                         quarantine: quarantine, now: Date(), limit: limit)
+                       .map(\.key))
+
+    // Every orphan gets a plan, not only the eligible ones, because a stack whose worktree
+    // was deleted is taken without waiting. The limit stays on the quarantine: it bounds a
+    // judgement about time, and a deleted directory is not one.
+    let keep = Reaper.keepMarkedWorktrees(in: sample)
+    let plans = snapshot.orphans.map { group in
+        (group, AutoReap.plan(
+            AttributionEngine.reapPlan(
+                for: group.key, processes: sample.processes, environments: sample.environments,
+                containers: sample.containers, roster: sample.roster, keepMarkedWorktrees: keep,
+                scope: .startedByClaude),
+            quarantineElapsed: eligible.contains(group.key)))
+    }.filter { !$0.1.isEmpty }
+
+    guard !plans.isEmpty else {
+        print("nothing orphaned for longer than \(Int(quarantine / 3600))h "
+              + "or left behind by a deleted worktree")
         exit(0)
     }
 
-    let keep = Reaper.keepMarkedWorktrees(in: sample)
-    let plans = eligible.map { group in
-        (group, AttributionEngine.reapPlan(
-            for: group.key, processes: sample.processes, environments: sample.environments,
-            containers: sample.containers, roster: sample.roster, keepMarkedWorktrees: keep,
-            scope: .startedByClaude))
-    }.filter { !$0.1.isEmpty }
-
     for (group, plan) in plans {
-        let since = store.orphanedSince()[group.key.storageKey]
+        let since = orphanedSince[group.key.storageKey]
         let age = since.map { Int(Date().timeIntervalSince($0) / 3600) } ?? 0
-        print("\(group.label): orphaned \(age)h, "
+        let deleted = plan.containers.contains(where: \.remove) ? ", worktree deleted" : ""
+        print("\(group.label): orphaned \(age)h\(deleted), "
               + "\(plan.processes.count) processes, \(plan.containers.count) containers")
         for target in plan.processes { print("    \(target.pid)  \(target.command.prefix(90))") }
         for target in plan.containers { print("    container \(target.name)") }
@@ -285,6 +296,8 @@ if flag("--auto-reap") {
         print("\(group.label): \(outcome.terminated.count) signalled, "
               + "\(outcome.killed.count) escalated, "
               + "\(outcome.containersStopped.count) containers stopped"
+              + (outcome.containersRemoved.isEmpty ? ""
+                 : ", \(outcome.containersRemoved.count) containers removed")
               + (outcome.survived.isEmpty ? ""
                  : ", survived: \(outcome.survived.map(String.init).joined(separator: ", "))"))
     }

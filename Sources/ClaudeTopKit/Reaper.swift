@@ -5,11 +5,13 @@ public struct ReapOutcome: Sendable, Equatable {
     public let killed: [Int32]
     public let survived: [Int32]
     public let containersStopped: [String]
+    public let containersRemoved: [String]
 
     public init(terminated: [Int32], killed: [Int32], survived: [Int32],
-                containersStopped: [String]) {
+                containersStopped: [String], containersRemoved: [String] = []) {
         self.terminated = terminated; self.killed = killed
         self.survived = survived; self.containersStopped = containersStopped
+        self.containersRemoved = containersRemoved
     }
 }
 
@@ -29,6 +31,7 @@ public struct Reaper {
     private let signaller: Signaller
     private let isAlive: LivenessCheck
     private let stopContainer: @Sendable (String) -> Bool
+    private let removeContainer: @Sendable (String) -> Bool
     private let logURL: URL
     private let now: @Sendable () -> Date
 
@@ -40,11 +43,13 @@ public struct Reaper {
     public init(signaller: @escaping Signaller = { kill($0, $1) == 0 },
                 isAlive: @escaping LivenessCheck = { kill($0, 0) == 0 },
                 stopContainer: @escaping @Sendable (String) -> Bool = Reaper.dockerStop,
+                removeContainer: @escaping @Sendable (String) -> Bool = Reaper.dockerRemove,
                 logURL: URL = Reaper.defaultLogURL,
                 now: @escaping @Sendable () -> Date = { Date() }) {
         self.signaller = signaller
         self.isAlive = isAlive
         self.stopContainer = stopContainer
+        self.removeContainer = removeContainer
         self.logURL = logURL
         self.now = now
     }
@@ -84,14 +89,23 @@ public struct Reaper {
         }
 
         var stopped: [String] = []
-        for target in plan.containers where stopContainer(target.containerID) {
-            stopped.append(target.containerID)
-            append(log: "STOP container=\(target.name) id=\(target.containerID) "
-                        + "key=\(plan.key.storageKey) reason=\(target.reason)")
+        var removed: [String] = []
+        for target in plan.containers {
+            if target.remove {
+                guard removeContainer(target.containerID) else { continue }
+                removed.append(target.containerID)
+                append(log: "REMOVE container=\(target.name) id=\(target.containerID) "
+                            + "key=\(plan.key.storageKey) reason=\(target.reason)")
+            } else {
+                guard stopContainer(target.containerID) else { continue }
+                stopped.append(target.containerID)
+                append(log: "STOP container=\(target.name) id=\(target.containerID) "
+                            + "key=\(plan.key.storageKey) reason=\(target.reason)")
+            }
         }
 
-        return ReapOutcome(terminated: terminated, killed: killed,
-                           survived: survived, containersStopped: stopped)
+        return ReapOutcome(terminated: terminated, killed: killed, survived: survived,
+                           containersStopped: stopped, containersRemoved: removed)
     }
 
     /// Every signal is recorded with the reason the target was selected, so a reap can be
@@ -122,10 +136,7 @@ public struct Reaper {
         let candidates = Set(sample.environments.values.compactMap(\.pwd)
                              + sample.sessions.map(\.cwd))
         for path in candidates {
-            guard let marker = path.range(of: "/.claude/worktrees/"),
-                  let name = path[marker.upperBound...].split(separator: "/").first
-            else { continue }
-            let root = String(path[path.startIndex..<marker.upperBound]) + name
+            guard let root = AttributionEngine.worktreeRoot(forPath: path) else { continue }
             if FileManager.default.fileExists(atPath: root + "/.claude-top-keep") {
                 marked.insert(root)
             }
@@ -136,5 +147,13 @@ public struct Reaper {
     public static let dockerStop: @Sendable (String) -> Bool = { id in
         guard let docker = Shell.locate("docker") else { return false }
         return Shell.run(docker, ["stop", id], timeout: 15) != nil
+    }
+
+    /// `-f` because the container is usually still running. Never `-v`: an anonymous
+    /// volume can outlive its container safely, and pruning those is a decision about the
+    /// whole machine rather than about one stack.
+    public static let dockerRemove: @Sendable (String) -> Bool = { id in
+        guard let docker = Shell.locate("docker") else { return false }
+        return Shell.run(docker, ["rm", "-f", id], timeout: 15) != nil
     }
 }

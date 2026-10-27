@@ -267,6 +267,14 @@ public enum AttributionEngine {
         return WorktreeID(repo: String(repo), worktree: String(worktree))
     }
 
+    /// The worktree directory itself, from any path inside it.
+    static func worktreeRoot(forPath path: String) -> String? {
+        guard let marker = path.range(of: worktreeMarker),
+              let name = path[marker.upperBound...].split(separator: "/").first
+        else { return nil }
+        return String(path[..<marker.upperBound]) + name
+    }
+
     /// One orphan key per dead session, chosen once so that every child of that session
     /// lands in the same group even if some of them have since moved elsewhere on disk.
     /// Two dead sessions in the same worktree deliberately collapse together: the person

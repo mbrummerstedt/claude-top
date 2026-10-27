@@ -135,4 +135,44 @@ struct ReaperTests {
         #expect(contents.contains("pid=500"))
         #expect(contents.contains("pid=600"))
     }
+
+    @Test("A container marked for removal is removed, not stopped")
+    func removalIsNotAStop() throws {
+        // Only a stack whose worktree was deleted is marked. Stopping it would leave a
+        // container nothing can ever start again.
+        let log = temporaryLog(); defer { try? FileManager.default.removeItem(at: log) }
+        let calls = Calls()
+        let reaper = Reaper(signaller: { _, _ in true }, isAlive: { _ in false },
+                            stopContainer: { calls.record("stop \($0)") },
+                            removeContainer: { calls.record("rm \($0)") },
+                            logURL: log)
+
+        let plan = ReapPlan(
+            key: .orphan(repo: "metrics-book", worktree: "agent-a1"), processes: [],
+            containers: [
+                ReapComposeTarget(containerID: "gone", name: "mb-postgres-1",
+                                  workingDirectory: "/tmp", reason: "worktree deleted",
+                                  remove: true),
+                ReapComposeTarget(containerID: "kept", name: "mb-cerbos-1",
+                                  workingDirectory: "/tmp", reason: "compose working_dir"),
+            ])
+        let outcome = reaper.execute(plan, sleeper: { _ in })
+
+        #expect(calls.all == ["rm gone", "stop kept"])
+        #expect(outcome.containersRemoved == ["gone"])
+        #expect(outcome.containersStopped == ["kept"])
+        let contents = try String(contentsOf: log, encoding: .utf8)
+        #expect(contents.contains("REMOVE container=mb-postgres-1 id=gone"))
+        #expect(contents.contains("reason=worktree deleted"))
+    }
+
+    private final class Calls: @unchecked Sendable {
+        private let lock = NSLock()
+        private(set) var all: [String] = []
+        func record(_ call: String) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            all.append(call)
+            return true
+        }
+    }
 }

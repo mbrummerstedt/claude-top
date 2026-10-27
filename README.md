@@ -149,7 +149,7 @@ rm -f ~/.claude/state/resources.db             # the rolling 24h of history
 | `claude-top --sample` | One sampler tick; what the LaunchAgent runs |
 | `claude-top --statusline` | One line for a shell prompt |
 | `claude-top --reap` | Stop the leftovers of sessions that are gone |
-| `claude-top --auto-reap` | Unattended; only worktrees orphaned past a quarantine |
+| `claude-top --auto-reap` | Unattended; only worktrees orphaned past a quarantine, plus Compose stacks whose worktree was deleted |
 | `claude-top --hook <event>` | Guardrail hooks; see [docs/HOOKS.md](docs/HOOKS.md) |
 
 `--dry-run` shows what a reap would stop and stops nothing. `--yes` skips the confirmation
@@ -314,6 +314,14 @@ On top of the rules for something running unattended: what Claude started only, 
 unlabelled container, and `.claude-top-keep` exempts a worktree entirely. A run stops at most three worktrees, so
 any future mistake stays small enough to notice and recover from, and the backlog is
 worked through over successive runs.
+
+One case skips the quarantine. When a worktree has been deleted from disk, which is what
+happens to a subagent's worktree once it finishes, its Compose containers are removed
+(`docker rm -f`, without `-v`) on the next run. The quarantine protects work someone might
+come back to, and nobody can come back to a directory that is gone. It counts only when
+the worktree is missing from a `.claude/worktrees/` that is still there, so an unmounted
+disk is not mistaken for a deletion. Processes from that worktree still wait out the
+quarantine, and these removals do not count towards the three.
 
 Watch it before trusting it:
 

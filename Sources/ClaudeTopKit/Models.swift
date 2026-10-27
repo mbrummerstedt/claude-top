@@ -423,10 +423,14 @@ public struct ReapComposeTarget: Sendable, Equatable {
     public let name: String
     public let workingDirectory: String
     public let reason: String
+    /// Removed rather than stopped. Set only for a stack whose worktree has been deleted,
+    /// where a stopped container is one nothing can ever start again.
+    public let remove: Bool
 
-    public init(containerID: String, name: String, workingDirectory: String, reason: String) {
+    public init(containerID: String, name: String, workingDirectory: String, reason: String,
+                remove: Bool = false) {
         self.containerID = containerID; self.name = name
-        self.workingDirectory = workingDirectory; self.reason = reason
+        self.workingDirectory = workingDirectory; self.reason = reason; self.remove = remove
     }
 }
 
